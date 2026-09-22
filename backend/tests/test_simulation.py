@@ -60,3 +60,14 @@ def test_time_budget_stops_loop_and_keeps_checkpoint(tmp_path: Path) -> None:
     assert loop.state == LoopState.STOPPED
     assert "Time budget" in (loop.termination_reason or "")
     assert loop.current_draft == loop.best_draft
+
+
+def test_scheduler_records_an_explainable_decision(tmp_path: Path) -> None:
+    engine = make_engine(tmp_path)
+    engine.step()
+    decision = engine.last_decision
+    assert decision is not None
+    assert decision["selected_id"] == "converge"
+    assert decision["candidates"][0]["effective_priority"] == 6
+    assert "base 6 + aging 0" in decision["message"]
+    assert any(event["type"] == "decision" for event in engine.events)

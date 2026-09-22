@@ -74,6 +74,8 @@ class LoopOSEngine:
         self.sequence = 0
         self.scheduler_status = "idle"
         self.last_dispatched_id: str | None = None
+        self.last_decision: dict[str, Any] | None = None
+        self.scheduler_cycles = 0
         self.preemptions = 0
         self.iterations_avoided = 0
         self._task: asyncio.Task[None] | None = None
@@ -112,11 +114,17 @@ class LoopOSEngine:
         self.sequence = 0
         self.scheduler_status = "idle"
         self.last_dispatched_id = None
+        self.last_decision = None
+        self.scheduler_cycles = 0
         self.preemptions = 0
         self.iterations_avoided = 0
         self._urgent_counter = 0
         self.run_id = self.store.create_run(self._now())
-        self._emit("system", None, "Loop table initialized with three demonstration loops.")
+        self._emit(
+            "system",
+            None,
+            "Created three demo loops. Press Start to let the scheduler choose the first loop.",
+        )
 
     def _emit(self, event_type: str, loop_id: str | None, message: str,
               payload: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -149,7 +157,11 @@ class LoopOSEngine:
             return
         self.scheduler_status = "running"
         self.store.set_run_status(self.run_id, "running")
-        self._emit("scheduler", None, "Scheduler started.")
+        self._emit(
+            "scheduler",
+            None,
+            "Scheduler started. Each cycle runs one complete, safe iteration.",
+        )
         if self._task is None or self._task.done():
             self._task = asyncio.create_task(self._run())
 
@@ -170,7 +182,7 @@ class LoopOSEngine:
             if loop.state == LoopState.PAUSED:
                 loop.state = LoopState.READY
         self.start()
-        self._emit("scheduler", None, "Paused loops returned to the ready queue.")
+        self._emit("scheduler", None, "Scheduler resumed; paused work returned to the ready queue.")
 
     def inject_urgent(self) -> LoopControlBlock:
         self._urgent_counter += 1
@@ -182,7 +194,12 @@ class LoopOSEngine:
             token_budget=1200, time_budget_seconds=30,
         )
         self.loops[loop_id] = loop
-        self._emit("arrival", loop_id, "Urgent loop entered the ready queue.")
+        self._emit(
+            "arrival",
+            loop_id,
+            "Urgent work entered with base priority 10 and will be considered at the next safe boundary.",
+            {"base_priority": 10, "safe_boundary": True},
+        )
         return loop
 
     def stop_loop(self, loop_id: str) -> bool:
@@ -190,7 +207,7 @@ class LoopOSEngine:
         if not loop or loop.state in TERMINAL_STATES:
             return False
         loop.state = LoopState.STOPPED
-        loop.termination_reason = "Stopped by operator"
+        loop.termination_reason = "Stopped manually by the operator; best checkpoint retained."
         self._emit("termination", loop.id, loop.termination_reason)
         return True
 
@@ -214,14 +231,48 @@ class LoopOSEngine:
         runnable = self._runnable()
         if not runnable:
             return False
+        self.scheduler_cycles += 1
         for loop in runnable:
             if loop.id != self.last_dispatched_id:
                 loop.wait_ticks += 1
             loop.effective_priority = loop.base_priority + loop.wait_ticks // self.AGING_INTERVAL
 
-        selected = max(runnable, key=lambda loop: (
+        ranking_key = lambda loop: (
             loop.effective_priority, loop.wait_ticks, -loop.iterations
-        ))
+        )
+        ranked = sorted(runnable, key=ranking_key, reverse=True)
+        selected = ranked[0]
+        candidates = [
+            {
+                "id": loop.id,
+                "name": loop.name,
+                "state": loop.state.value,
+                "base_priority": loop.base_priority,
+                "aging_bonus": loop.wait_ticks // self.AGING_INTERVAL,
+                "effective_priority": loop.effective_priority,
+                "wait_ticks": loop.wait_ticks,
+            }
+            for loop in ranked
+        ]
+        selected_bonus = selected.wait_ticks // self.AGING_INTERVAL
+        decision_message = (
+            f"Selected {selected.name}: priority {selected.effective_priority} "
+            f"= base {selected.base_priority} + aging {selected_bonus}; "
+            f"highest of {len(runnable)} runnable loop{'s' if len(runnable) != 1 else ''}."
+        )
+        self.last_decision = {
+            "cycle": self.scheduler_cycles,
+            "selected_id": selected.id,
+            "selected_name": selected.name,
+            "message": decision_message,
+            "candidates": candidates,
+        }
+        self._emit(
+            "decision",
+            selected.id,
+            decision_message,
+            self.last_decision,
+        )
         previous = self.loops.get(self.last_dispatched_id or "")
         if (previous and previous.id != selected.id
                 and previous.state not in TERMINAL_STATES
@@ -230,16 +281,24 @@ class LoopOSEngine:
             self.preemptions += 1
             self._emit(
                 "preemption", previous.id,
-                f"{previous.name} yielded safely to {selected.name}.",
-                {"preempted_by": selected.id},
+                f"Paused {previous.name} after its completed iteration so higher-priority {selected.name} can run.",
+                {
+                    "preempted_by": selected.id,
+                    "from_priority": previous.effective_priority,
+                    "to_priority": selected.effective_priority,
+                    "safe_boundary": True,
+                },
             )
 
         selected.state = LoopState.RUNNING
         selected.wait_ticks = 0
-        selected.effective_priority = selected.base_priority
         self.last_dispatched_id = selected.id
-        self._emit("dispatch", selected.id,
-                   f"Dispatched at effective priority {selected.effective_priority}.")
+        self._emit(
+            "dispatch",
+            selected.id,
+            f"Running iteration {selected.iterations + 1} of {selected.max_iterations}.",
+            {"cycle": self.scheduler_cycles, "effective_priority": selected.effective_priority},
+        )
         self._iterate(selected)
         if selected.state == LoopState.RUNNING:
             selected.state = LoopState.READY
@@ -289,9 +348,25 @@ class LoopOSEngine:
             "iteration": loop.iterations, "score": score, "tokens": tokens,
             "draft": draft, "fingerprint": fingerprint,
         })
-        self._emit("iteration", loop.id,
-                   f"Iteration {loop.iterations} finished with score {score:.3f}.",
-                   {"score": score, "tokens": tokens, "fingerprint": fingerprint})
+        self._emit(
+            "iteration",
+            loop.id,
+            (
+                f"Iteration {loop.iterations} scored {score:.3f} "
+                f"({improvement:+.3f}); repetition {loop.repeated_drafts}/{self.REPEAT_LIMIT}, "
+                f"stagnation {loop.stagnant_steps}/{self.WATCHDOG_LIMIT}."
+            ),
+            {
+                "score": score,
+                "score_change": round(improvement, 3),
+                "tokens": tokens,
+                "fingerprint": fingerprint,
+                "repeated_drafts": loop.repeated_drafts,
+                "repeat_limit": self.REPEAT_LIMIT,
+                "stagnant_steps": loop.stagnant_steps,
+                "watchdog_limit": self.WATCHDOG_LIMIT,
+            },
+        )
 
         if loop.repeated_drafts >= self.REPEAT_LIMIT:
             self._terminate(loop, "Repeated-draft detector stopped a livelocked loop.")
@@ -328,6 +403,16 @@ class LoopOSEngine:
         return {
             "run_id": self.run_id, "scheduler_status": self.scheduler_status,
             "loops": loops, "events": list(reversed(self.events[-80:])),
+            "last_decision": self.last_decision,
+            "policy": {
+                "name": "Priority scheduling with aging",
+                "formula": "effective priority = base priority + floor(wait ticks / 2)",
+                "safe_preemption": "Loops can switch only after a complete iteration.",
+                "convergence_delta": self.CONVERGENCE_DELTA,
+                "convergence_window": self.CONVERGENCE_WINDOW,
+                "repeat_limit": self.REPEAT_LIMIT,
+                "watchdog_limit": self.WATCHDOG_LIMIT,
+            },
             "metrics": {
                 "total_loops": len(loops), "terminal_loops": len(terminal),
                 "preemptions": self.preemptions,
