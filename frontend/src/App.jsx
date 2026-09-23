@@ -1,9 +1,12 @@
 import { useEffect, useState } from 'react';
+import { createBrowserDemo } from './browserDemo';
 
-const API = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+const API = import.meta.env.VITE_API_URL || (import.meta.env.DEV ? 'http://localhost:8000' : '');
+const browserOnly = !API;
 const STAGES = {plan: 'Logistics: prepare a plan', reserve: 'Checker: reserve resources', respond: 'Response team: carry out plan', announce: 'Communications: publish update'};
 const INCIDENTS = [['power', 'Power failure', 'Main stage'], ['rain', 'Rain approaching', 'Indoor hall'], ['crowd', 'Growing queue', 'Entrance']];
 const LABELS = {queued: 'Ready', blocked: 'Waiting for resources', responding: 'Responding', resolved: 'Resolved', stopped: 'Stopped'};
+const localDemo = browserOnly ? createBrowserDemo() : null;
 
 export default function App() {
   const [world, setWorld] = useState(null);
@@ -16,10 +19,13 @@ export default function App() {
     let timer;
     async function refresh() {
       try {
+        if (browserOnly) { const data = await localDemo.get(); if (!cancelled) setWorld(data); }
+        else {
         const response = await fetch(`${API}/api/crisis/state`);
         if (!response.ok) throw new Error('Server unavailable');
         const data = await response.json();
         if (!cancelled) setWorld(data);
+        }
       } catch { if (!cancelled) setError('Cannot reach the server. Start the backend, then reload this page.'); }
       if (!cancelled) timer = setTimeout(refresh, 1000);
     }
@@ -29,6 +35,7 @@ export default function App() {
   async function command(path, value) {
     setPending(true); setError('');
     try {
+      if (browserOnly) { setWorld(await localDemo.post(path,value)); return; }
       const response = await fetch(`${API}/api/crisis/${path}`, {method: 'POST', headers: {'Content-Type': 'application/json'}, ...(value ? {body: JSON.stringify({value})} : {})});
       const result = await response.json();
       if (!response.ok) throw new Error(result.detail || 'Action failed');
@@ -75,7 +82,7 @@ export default function App() {
         {!['resolved','stopped'].includes(item.status) && <button className="danger" disabled={disabled} onClick={() => command(`incidents/${item.id}/stop`)}>Stop task & release resources</button>}
       </div></aside></div>
       <section className="panel trail"><div className="heading"><div><span className="eyebrow">DECISION TRAIL</span><h2>What happened, and why</h2></div><span className="muted">Newest first</span></div><div className="events">{world.events.map(e => <article key={`${world.run_id}-${e.sequence}`}><time>{new Date(e.timestamp).toLocaleTimeString()}</time><span className={`event-type ${e.type}`}>{e.type}</span><p>{e.message}</p></article>)}</div></section>
-      <section className="panel settings"><div><span className="eyebrow">PLANNING ENGINE</span><h2>{world.mode === 'demo' ? 'Demo planner' : 'Codex planner'}</h2><p>{world.mode === 'demo' ? 'Scripted plans, predictable results, no connection needed.' : 'Real AI proposals. The festival rules still decide what is allowed.'}</p><p className="muted">{world.connection.message}</p></div><div className="buttons"><button disabled={disabled || running} onClick={() => command('codex/check')}>Check Codex sign-in</button><button disabled={disabled || running} onClick={() => command('mode', world.mode === 'demo' ? 'codex' : 'demo')}>Use {world.mode === 'demo' ? 'Codex' : 'Demo'}</button></div></section>
+      <section className="panel settings"><div><span className="eyebrow">PLANNING ENGINE</span><h2>{browserOnly ? 'Browser demo' : world.mode === 'demo' ? 'Demo planner' : 'Codex planner'}</h2><p>{browserOnly ? 'Runs in this browser. No server, sign-in, or API key needed.' : world.mode === 'demo' ? 'Scripted plans, predictable results, no connection needed.' : 'Real AI proposals. The festival rules still decide what is allowed.'}</p><p className="muted">{browserOnly ? 'Codex mode is available when running the full app locally.' : world.connection.message}</p></div>{!browserOnly && <div className="buttons"><button disabled={disabled || running} onClick={() => command('codex/check')}>Check Codex sign-in</button><button disabled={disabled || running} onClick={() => command('mode', world.mode === 'demo' ? 'codex' : 'demo')}>Use {world.mode === 'demo' ? 'Codex' : 'Demo'}</button></div>}</section>
       <button className="text-button" aria-expanded={advanced} onClick={() => setAdvanced(!advanced)}>{advanced ? 'Hide' : 'Show'} OS learning tools</button>
       {advanced && <section className="panel learning"><h2>How the operating-system ideas work</h2><p>Higher priorities go first. Every three waiting cycles adds one priority point. A task switches only between finished steps. Resources are reserved together, preventing partial-allocation deadlocks. Visitor announcements depend on the response finishing.</p><div className="chips"><span>{world.metrics.switches} task switches</span><span>{world.metrics.rejected} invalid plans rejected</span><span>{world.metrics.recovered} checkpoints restored</span></div>{world.decision && <div className="rankings"><h3>Last scheduling decision</h3>{world.decision.candidates.map((c,n) => <p key={n}>{c.title}: {c.base} base + {c.age_bonus} waiting bonus = <b>{c.score}</b></p>)}</div>}<button disabled={disabled} onClick={() => command('control/invalid-plan')}>Try an impossible plan</button><p className="muted">Requests two generators when only one exists. Watch rejection, checkpoint recovery, or the retry watchdog without changing resources.</p></section>}
       <footer>LoopOS Crisis Lab · Fictional coordination exercise, not emergency advice · Run {world.run_id}</footer>
