@@ -1,239 +1,84 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from 'react';
 
-const API = import.meta.env.VITE_API_URL || "http://localhost:8000";
-const WS = API.replace(/^http/, "ws");
+const API = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+const STAGES = {plan: 'Logistics: prepare a plan', reserve: 'Checker: reserve resources', respond: 'Response team: carry out plan', announce: 'Communications: publish update'};
+const INCIDENTS = [['power', 'Power failure', 'Main stage'], ['rain', 'Rain approaching', 'Indoor hall'], ['crowd', 'Growing queue', 'Entrance']];
+const LABELS = {queued: 'Ready', blocked: 'Waiting for resources', responding: 'Responding', resolved: 'Resolved', stopped: 'Stopped'};
 
-const metricLabels = {
-  total_loops: ["Total loops", "All processes in this run"],
-  terminal_loops: ["Finished", "Completed or safely stopped"],
-  preemptions: ["Preemptions", "Safe priority switches"],
-  iterations_avoided: ["Iterations saved", "Work avoided by convergence"],
-  repeated_drafts_detected: ["Livelocks caught", "Repeating agents stopped"],
-  average_wait_ticks: ["Average wait", "Scheduler ticks spent waiting"],
-};
-
-const stateHelp = {
-  ready: "Eligible for the next scheduler cycle",
-  running: "Executing one safe iteration",
-  paused: "Paused by the operator",
-  waiting: "Yielded to higher-priority work",
-  completed: "Finished successfully",
-  stopped: "Stopped by a safety rule or operator",
-  idle: "Ready to start",
-};
-
-function StatePill({ state }) {
-  return <span className={`state state-${state}`}>{state}</span>;
-}
-
-function App() {
-  const [data, setData] = useState(null);
-  const [selectedId, setSelectedId] = useState("converge");
-  const [connected, setConnected] = useState(false);
-  const [busy, setBusy] = useState("");
-  const [error, setError] = useState("");
-
-  const loadState = useCallback(async () => {
-    try {
-      const response = await fetch(`${API}/api/state`);
-      if (!response.ok) throw new Error("Backend returned an error");
-      setData(await response.json());
-      setError("");
-    } catch {
-      setError(`Cannot reach LoopOS at ${API}. Start the FastAPI server first.`);
-    }
-  }, []);
-
+export default function App() {
+  const [world, setWorld] = useState(null);
+  const [selected, setSelected] = useState(null);
+  const [error, setError] = useState('');
+  const [pending, setPending] = useState(false);
+  const [advanced, setAdvanced] = useState(false);
   useEffect(() => {
-    loadState();
-    let socket;
-    let retry;
-    const connect = () => {
-      socket = new WebSocket(`${WS}/ws`);
-      socket.onopen = () => setConnected(true);
-      socket.onclose = () => {
-        setConnected(false);
-        retry = window.setTimeout(connect, 1500);
-      };
-      socket.onmessage = (message) => {
-        const packet = JSON.parse(message.data);
-        if (packet.type === "snapshot") setData(packet.payload);
-        else loadState();
-      };
-    };
-    connect();
-    return () => {
-      window.clearTimeout(retry);
-      if (socket) socket.close();
-    };
-  }, [loadState]);
-
-  const command = async (action, path = `/api/control/${action}`) => {
-    setBusy(action);
-    try {
-      const response = await fetch(`${API}${path}`, { method: "POST" });
-      if (!response.ok) throw new Error(await response.text());
-      setData(await response.json());
-      setError("");
-    } catch (requestError) {
-      setError(requestError.message || "Command failed");
-    } finally {
-      setBusy("");
+    let cancelled = false;
+    let timer;
+    async function refresh() {
+      try {
+        const response = await fetch(`${API}/api/crisis/state`);
+        if (!response.ok) throw new Error('Server unavailable');
+        const data = await response.json();
+        if (!cancelled) setWorld(data);
+      } catch { if (!cancelled) setError('Cannot reach the server. Start the backend, then reload this page.'); }
+      if (!cancelled) timer = setTimeout(refresh, 1000);
     }
-  };
-
-  const selected = useMemo(
-    () => data?.loops.find((loop) => loop.id === selectedId) || data?.loops[0],
-    [data, selectedId],
-  );
-  const loopNames = useMemo(
-    () => Object.fromEntries((data?.loops || []).map((loop) => [loop.id, loop.name])),
-    [data],
-  );
-
-  if (!data) {
-    return <main className="loading"><div className="spinner" />{error || "Booting control plane..."}</main>;
+    refresh();
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, []);
+  async function command(path, value) {
+    setPending(true); setError('');
+    try {
+      const response = await fetch(`${API}/api/crisis/${path}`, {method: 'POST', headers: {'Content-Type': 'application/json'}, ...(value ? {body: JSON.stringify({value})} : {})});
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.detail || 'Action failed');
+      setWorld(result);
+    } catch (e) { setError(e.message); }
+    finally { setPending(false); }
   }
-
-  const decision = data.last_decision;
-
-  return (
-    <div className="app-shell">
-      <header className="topbar">
-        <div className="brand">
-          <div className="brand-mark"><span /><span /><span /></div>
-          <div><h1>Loop<span>OS</span></h1><p>AI process control plane</p></div>
-        </div>
-        <div className="system-status">
-          <span className={`connection ${connected ? "online" : "offline"}`} />
-          <span>{connected ? "Live updates connected" : "Reconnecting"}</span>
-          <span className="run-id">Run {String(data.run_id).padStart(3, "0")}</span>
-        </div>
-      </header>
-
-      <main className="content">
-        <section className="hero">
-          <div className="hero-copy">
-            <span className="eyebrow">OPERATING-SYSTEM CONTROL FOR AI AGENTS</span>
-            <h2>See every decision.<br /><em>Control every loop.</em></h2>
-            <p>LoopOS treats each iterative AI task like an operating-system process. It schedules work, watches for wasted iterations, and preserves the best result.</p>
-          </div>
-          <div className="scheduler-card">
-            <div className="scheduler-heading">
-              <div><span className="section-label">SCHEDULER</span><strong>{stateHelp[data.scheduler_status] || "Simulation active"}</strong></div>
-              <StatePill state={data.scheduler_status} />
-            </div>
-            <div className="controls">
-              <button className="primary" disabled={busy || data.scheduler_status === "running"} onClick={() => command("start")}>Start simulation</button>
-              <button disabled={busy || data.scheduler_status !== "running"} onClick={() => command("pause")}>Pause</button>
-              <button disabled={busy || data.scheduler_status !== "paused"} onClick={() => command("resume")}>Resume</button>
-              <button disabled={busy} onClick={() => command("reset")}>Reset</button>
-              <button className="urgent" disabled={busy} onClick={() => command("inject-urgent")}>+ Add urgent loop</button>
-            </div>
-            <div className="policy"><span>Scheduling policy</span><strong>Priority + aging</strong><small>Switches happen only after a complete iteration.</small></div>
-          </div>
-        </section>
-
-        {error && <div className="error-banner">{error}</div>}
-
-        <section className="explanation" aria-label="How LoopOS works">
-          <div className="explanation-intro"><span className="eyebrow">HOW IT WORKS</span><h3>One controlled cycle at a time</h3></div>
-          {[
-            ["1", "Queue", "AI loops enter the ready queue with a base priority."],
-            ["2", "Choose", "The scheduler adds an aging bonus and selects the highest score."],
-            ["3", "Improve", "The chosen loop produces and evaluates one new draft."],
-            ["4", "Protect", "Safety rules converge, stop, or recover the loop when needed."],
-          ].map(([number, title, text]) => <article className="explain-step" key={number}><b>{number}</b><div><strong>{title}</strong><p>{text}</p></div></article>)}
-        </section>
-
-        <section className="metrics">
-          {Object.entries(data.metrics).map(([key, value]) => (
-            <article className="metric" key={key}>
-              <span>{metricLabels[key]?.[0] || key}</span>
-              <strong>{value}</strong>
-              <small>{metricLabels[key]?.[1]}</small>
-            </article>
-          ))}
-        </section>
-
-        <section className="decision-panel panel">
-          <div className="panel-title">
-            <div><span className="kicker">SCHEDULER REASONING</span><h3>{decision ? `Decision cycle ${decision.cycle}` : "Waiting for the first decision"}</h3></div>
-            <span className="formula">{data.policy.formula}</span>
-          </div>
-          {decision ? <div className="decision-content">
-            <div className="decision-summary"><span>WHY THIS LOOP?</span><p>{decision.message}</p></div>
-            <div className="candidate-list">
-              {decision.candidates.map((candidate, index) => (
-                <div className={`candidate ${index === 0 ? "winner" : ""}`} key={candidate.id}>
-                  <span className="rank">{index + 1}</span>
-                  <div><strong>{candidate.name}</strong><small>Base {candidate.base_priority} + aging {candidate.aging_bonus}</small></div>
-                  <b>{candidate.effective_priority}</b>
-                </div>
-              ))}
-            </div>
-          </div> : <div className="empty-decision"><strong>Press Start simulation.</strong><span>LoopOS will show every candidate and explain why the winner was selected.</span></div>}
-        </section>
-
-        <section className="workspace">
-          <div className="panel loop-panel">
-            <div className="panel-title"><div><span className="kicker">LOOP TABLE</span><h3>AI process queue</h3></div><span className="count">{data.loops.length} loops</span></div>
-            <p className="panel-help">Select a row to inspect its draft, safeguards, and iteration history.</p>
-            <div className="table-wrap">
-              <table>
-                <thead><tr><th>AI loop</th><th>State</th><th>Effective priority</th><th>Progress</th><th>Quality</th><th>Token budget</th></tr></thead>
-                <tbody>{data.loops.map((loop) => (
-                  <tr key={loop.id} className={selected?.id === loop.id ? "selected" : ""} onClick={() => setSelectedId(loop.id)}>
-                    <td><strong>{loop.name}</strong><small>{loop.task}</small></td>
-                    <td><StatePill state={loop.state} /><small>{stateHelp[loop.state]}</small></td>
-                    <td><b className="priority-number">{loop.effective_priority}</b><small>Base {loop.base_priority}, waited {loop.wait_ticks}</small></td>
-                    <td><strong>{loop.iterations} / {loop.max_iterations}</strong><small>iterations</small></td>
-                    <td><span className="score">{Math.round(loop.score * 100)}%</span><small>best {Math.round(loop.best_score * 100)}%</small></td>
-                    <td><div className="budget"><span style={{ width: `${Math.min(loop.tokens_used / loop.token_budget * 100, 100)}%` }} /></div><small>{loop.tokens_used} / {loop.token_budget}</small></td>
-                  </tr>
-                ))}</tbody>
-              </table>
-            </div>
-          </div>
-
-          <aside className="panel inspector">
-            <div className="panel-title"><div><span className="kicker">SELECTED LOOP</span><h3>Loop details</h3></div></div>
-            {selected && <>
-              <div className="inspector-head"><div className="loop-glyph">LOOP</div><div><h4>{selected.name}</h4><p>{selected.task}</p></div></div>
-              <dl>
-                <div><dt>Current state</dt><dd><StatePill state={selected.state} /></dd></div>
-                <div><dt>Effective priority</dt><dd>{selected.effective_priority} <small>(base {selected.base_priority})</small></dd></div>
-                <div><dt>Best checkpoint</dt><dd>{Math.round(selected.best_score * 100)}%</dd></div>
-                <div><dt>Resources used</dt><dd>{selected.tokens_used} tokens / {selected.elapsed_seconds}s</dd></div>
-                <div><dt>Safety counters</dt><dd>repeat {selected.repeated_drafts}/{data.policy.repeat_limit}, stagnant {selected.stagnant_steps}/{data.policy.watchdog_limit}</dd></div>
-              </dl>
-              <div className="draft"><span>LATEST DRAFT</span><p>{selected.current_draft}</p></div>
-              {selected.history.length > 0 && <div className="history"><span>QUALITY TRAIL</span>{selected.history.slice(-5).reverse().map((item) => <div key={item.iteration}><b>Iteration {item.iteration}</b><span>{Math.round(item.score * 100)}%</span></div>)}</div>}
-              {selected.termination_reason && <div className="reason"><span>FINAL OUTCOME</span>{selected.termination_reason}</div>}
-              {!['completed', 'stopped'].includes(selected.state) && <button className="stop" disabled={busy} onClick={() => command("stop", `/api/loops/${selected.id}/stop`)}>Stop this loop safely</button>}
-            </>}
-          </aside>
-        </section>
-
-        <section className="panel event-panel">
-          <div className="panel-title"><div><span className="kicker">EXPLAINABLE EVENT TRAIL</span><h3>What happened, and why</h3></div><span className="live-dot"><i />Live</span></div>
-          <div className="trail-header"><span>Time</span><span>Event</span><span>Loop</span><span>Explanation</span></div>
-          <div className="events">
-            {data.events.map((event) => (
-              <div className="event" key={`${event.sequence}-${event.timestamp}`}>
-                <time>{new Date(event.timestamp).toLocaleTimeString([], { hour12: false })}</time>
-                <span className={`event-type type-${event.type}`}>{event.type}</span>
-                <strong>{event.loop_id ? loopNames[event.loop_id] || event.loop_id : "LoopOS"}</strong>
-                <p>{event.message}</p>
-              </div>
-            ))}
-          </div>
-        </section>
-      </main>
-
-      <footer><span>LoopOS prototype v0.2</span><span>Deterministic simulation | SQLite history | WebSocket updates</span></footer>
-    </div>
-  );
+  if (!world) return <main className="boot"><h1>LoopOS Crisis Lab</h1><p>{error || 'Preparing the festival…'}</p><button onClick={() => location.reload()}>Reload</button></main>;
+  const item = world.incidents.find(i => i.id === selected) || world.incidents.find(i => i.status !== 'resolved') || world.incidents[0];
+  const active = world.incidents.filter(i => !['resolved', 'stopped'].includes(i.status));
+  const running = world.status === 'running';
+  const disabled = pending || world.busy;
+  return <>
+    <header><a className="brand" href="#"><span className="logo">L</span><span>LoopOS <b>Crisis Lab</b></span></a><span className="simulation-tag">Fictional festival exercise</span></header>
+    <main>
+      <section className="hero"><div><span className="eyebrow">YOUR FESTIVAL. YOUR CONTROL ROOM.</span><h1>Keep the festival<br/><span>moving.</span></h1><p>Handle surprises, share limited resources, and watch your response team make a plan. Every decision has a visible reason.</p></div>
+        <div className="welcome"><span className="step-label">START HERE</span><h2>Three simple steps</h2><ol><li>Start the festival exercise.</li><li>Add a power failure, rain, or a growing queue.</li><li>Watch plans get checked and resources move.</li></ol><p className="muted">Demo is repeatable. Codex mode creates real AI plans through your local ChatGPT sign-in.</p></div>
+      </section>
+      <section className="toolbar"><div className="status"><i className={running ? 'on' : ''}/><strong>{world.busy ? 'Finishing an agent turn…' : running ? 'Festival running' : world.status === 'completed' ? 'All tasks finished' : 'Ready when you are'}</strong><small>Cycle {world.tick}</small></div><div className="buttons">
+        <button className="primary" disabled={pending || running || world.busy} onClick={() => command('control/start')}>{world.tick ? 'Continue' : 'Start exercise'}</button>
+        <button disabled={pending || !running} onClick={() => command('control/pause')}>Pause</button>
+        <button disabled={disabled || running} onClick={() => command('control/step')}>One step</button>
+        <button disabled={disabled} onClick={() => {if (confirm('Start a fresh exercise? This run stays in saved event history.')) command('control/reset');}}>Reset</button>
+      </div></section>
+      {error && <div role="alert" className="error">{error}<button onClick={() => setError('')} aria-label="Dismiss error">×</button></div>}
+      <section className="resources" aria-label="Available resources">
+        {Object.entries(world.resources).map(([name, available]) => <article key={name}><span>{name}</span><strong>{available}<small> / {world.capacity[name]}</small></strong><p>available to assign</p><progress max={world.capacity[name]} value={available}/></article>)}
+        <article><span>Festival budget</span><strong>{world.budget}<small> credits</small></strong><p>Spent when a response starts</p></article>
+        <article className="success"><span>Problems resolved</span><strong>{world.metrics.resolved}<small> / {world.incidents.length}</small></strong><p>{active.length} tasks still in progress</p></article>
+      </section>
+      <div className="workspace"><section className="left-column">
+        <section className="panel"><div className="heading"><div><span className="eyebrow">FESTIVAL GROUNDS</span><h2>What’s happening where?</h2></div><span className="pill">Campus festival</span></div><div className="venue-map">
+          {['Main stage', 'Indoor hall', 'Food court', 'Entrance'].map((zone, index) => {const incidents = active.filter(i => i.zone === zone); return <button className={`zone zone-${index} ${incidents.length ? 'trouble' : ''}`} key={zone} onClick={() => {const found = world.incidents.find(i => i.zone === zone); if (found) setSelected(found.id);}}><span className="zone-icon">{['♫', '⌂', '☕', '↗'][index]}</span><strong>{zone}</strong><small>{incidents.length ? incidents[0].title : 'No active incident'}</small><span className="zone-status">{incidents.length ? 'Needs attention' : 'All clear'}</span></button>;})}
+        </div><div className="inject"><strong>Introduce a surprise</strong><div className="buttons">{INCIDENTS.map(([kind, title]) => <button key={kind} disabled={pending || active.some(i => i.kind === kind)} onClick={() => command('incidents', kind)}>+ {title}</button>)}</div></div></section>
+        <section className="panel"><div className="heading"><div><span className="eyebrow">RESPONSE QUEUE</span><h2>Every task, one place</h2></div></div><div className="task-list">{world.incidents.map(i => <button className={`task ${item.id === i.id ? 'selected' : ''}`} key={i.id} onClick={() => setSelected(i.id)}><div><span className={`badge ${i.status}`}>{LABELS[i.status]}</span><strong>{i.title}</strong><small>{['resolved','stopped'].includes(i.status) ? i.status === 'resolved' ? 'Resources released. Notice published.' : i.error : STAGES[i.stage]}</small></div><span className="priority">P{i.priority}<small>priority</small></span></button>)}</div></section>
+      </section>
+      <aside className="panel detail"><div className="heading"><div><span className="eyebrow">SELECTED INCIDENT</span><h2>{item.title}</h2></div></div><div className="detail-body"><p>{item.description}</p><div className="stage-list">{Object.entries(STAGES).map(([key, text], index) => <div className={item.stage === key ? 'current' : ''} key={key}><b>{index+1}</b><span>{text}</span></div>)}</div>
+        <h3>What it needs</h3><div className="chips">{Object.entries(item.needs).map(([k,v]) => <span key={k}>{v} {k}</span>)}<span>{item.cost} credits minimum</span></div>
+        {item.blocked_by.length > 0 && <p className="notice">Waiting for: {item.blocked_by.map(id => world.incidents.find(i => i.id === id)?.title).join(', ')}. The resource holder can continue working.</p>}
+        {item.plan ? <><h3>Checked response plan</h3><p>{item.plan.summary}</p><ol className="plan-steps">{item.plan.steps.map((s,n) => <li key={n}>{s}</li>)}</ol><p className="muted">Checkpoint saved. {Object.keys(item.allocation).length ? 'Resources reserved.' : 'Resources are assigned only when available.'}</p></> : <p className="empty">A response plan will appear when this task gets a turn.</p>}
+        {item.announcement && <blockquote><strong>Visitor notice</strong><p>{item.announcement}</p></blockquote>}
+        {item.error && <p className="notice">{item.error}</p>}
+        {item.history.length > 0 && <details><summary>Plan attempts ({item.history.length})</summary>{item.history.map((h,n) => <p key={n}><b>{h.source} · {h.accepted ? 'Passed' : 'Rejected'}</b><br/>{h.reason}</p>)}</details>}
+        {!['resolved','stopped'].includes(item.status) && <button className="danger" disabled={disabled} onClick={() => command(`incidents/${item.id}/stop`)}>Stop task & release resources</button>}
+      </div></aside></div>
+      <section className="panel trail"><div className="heading"><div><span className="eyebrow">DECISION TRAIL</span><h2>What happened, and why</h2></div><span className="muted">Newest first</span></div><div className="events">{world.events.map(e => <article key={`${world.run_id}-${e.sequence}`}><time>{new Date(e.timestamp).toLocaleTimeString()}</time><span className={`event-type ${e.type}`}>{e.type}</span><p>{e.message}</p></article>)}</div></section>
+      <section className="panel settings"><div><span className="eyebrow">PLANNING ENGINE</span><h2>{world.mode === 'demo' ? 'Demo planner' : 'Codex planner'}</h2><p>{world.mode === 'demo' ? 'Scripted plans, predictable results, no connection needed.' : 'Real AI proposals. The festival rules still decide what is allowed.'}</p><p className="muted">{world.connection.message}</p></div><div className="buttons"><button disabled={disabled || running} onClick={() => command('codex/check')}>Check Codex sign-in</button><button disabled={disabled || running} onClick={() => command('mode', world.mode === 'demo' ? 'codex' : 'demo')}>Use {world.mode === 'demo' ? 'Codex' : 'Demo'}</button></div></section>
+      <button className="text-button" aria-expanded={advanced} onClick={() => setAdvanced(!advanced)}>{advanced ? 'Hide' : 'Show'} OS learning tools</button>
+      {advanced && <section className="panel learning"><h2>How the operating-system ideas work</h2><p>Higher priorities go first. Every three waiting cycles adds one priority point. A task switches only between finished steps. Resources are reserved together, preventing partial-allocation deadlocks. Visitor announcements depend on the response finishing.</p><div className="chips"><span>{world.metrics.switches} task switches</span><span>{world.metrics.rejected} invalid plans rejected</span><span>{world.metrics.recovered} checkpoints restored</span></div>{world.decision && <div className="rankings"><h3>Last scheduling decision</h3>{world.decision.candidates.map((c,n) => <p key={n}>{c.title}: {c.base} base + {c.age_bonus} waiting bonus = <b>{c.score}</b></p>)}</div>}<button disabled={disabled} onClick={() => command('control/invalid-plan')}>Try an impossible plan</button><p className="muted">Requests two generators when only one exists. Watch rejection, checkpoint recovery, or the retry watchdog without changing resources.</p></section>}
+      <footer>LoopOS Crisis Lab · Fictional coordination exercise, not emergency advice · Run {world.run_id}</footer>
+    </main>
+  </>;
 }
-
-export default App;

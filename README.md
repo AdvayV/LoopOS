@@ -1,5 +1,9 @@
 # LoopOS
 
+## New: Crisis Lab
+
+The website now opens **Crisis Lab**, a fictional campus-festival control room with real resource checks and optional Codex planning through ChatGPT sign-in (no API key). Read [the Crisis Lab guide](CRISIS_LAB.md) for the walkthrough, integration setup, and OS concepts. The original simulation backend remains available.
+
 LoopOS is an operating-system-inspired control layer for iterative AI agents. It treats each agent loop as a schedulable process and demonstrates priority scheduling, aging, safe-boundary preemption, convergence detection, livelock protection, resource budgets, and checkpoint recovery.
 
 The first prototype is deterministic: it requires no model API key and produces the same observable scheduling behavior on every reset.
@@ -65,4 +69,3 @@ SQLite data is created at `backend/loopos.db` and excluded from version control.
 - `POST /api/loops/{loop_id}/stop` — stop a selected loop.
 - `GET /api/runs` and `GET /api/runs/{id}/events` — persisted run history.
 - `WS /ws` — ordered live kernel events.
-

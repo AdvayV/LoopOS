@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import asyncio
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
@@ -8,12 +10,27 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .database import EventStore
 from .simulation import LoopOSEngine
+from .crisis_api import CrisisService, make_router
 
 DATABASE_PATH = Path(os.getenv("LOOPOS_DB", Path(__file__).parents[1] / "loopos.db"))
 store = EventStore(DATABASE_PATH)
 engine = LoopOSEngine(store)
+crisis = CrisisService(store)
+
+
+@asynccontextmanager
+async def lifespan(app):
+    yield
+    if crisis.worker and not crisis.worker.done():
+        crisis.worker.cancel()
+        try:
+            await crisis.worker
+        except asyncio.CancelledError:
+            pass
+    crisis.codex.close()
 
 app = FastAPI(
+    lifespan=lifespan,
     title="LoopOS API",
     version="0.1.0",
     description="An OS-inspired control layer for iterative AI agents.",
@@ -25,6 +42,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.include_router(make_router(crisis))
 
 
 @app.get("/api/health")
