@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "test": "node --test src/uiModel.test.js tests/dashboard.test.mjs",
     "build": "vite build",
     "preview": "vite preview"
   },
