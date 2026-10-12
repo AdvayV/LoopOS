@@ -94,16 +94,12 @@ def run(loop_id: str, root: Path) -> int:
                 action = request
                 result = conn.request("syscall", loop=loop_id, action=request)["result"]
             score_before = state.get("score", 0.0)
-            verdict = conn.request("iteration", loop=loop_id, iteration=iteration, action=action, result=result)
-
-            with open(directory / "trace.jsonl", "a") as trace:
-                trace.write(json.dumps({
-                    "loop": loop_id, "iteration": iteration, "provider": provider.name, "model": spec.get("model"),
-                    "messages": messages + [{"role": "assistant", "content": reply}],
-                    "action": action, "result_ok": result.get("ok", False), "refused": result.get("refused", False),
-                    "score_before": score_before, "score_after": verdict["score"],
-                    "event": verdict.get("event", ""), "status": verdict.get("status", "running"),
-                }) + "\n")
+            # The supervisor appends this to the loop's trace before it replies, so a loop that shows
+            # as finished always has a complete trace.
+            verdict = conn.request("iteration", loop=loop_id, iteration=iteration, action=action, result=result,
+                                   trace={"provider": provider.name, "model": spec.get("model"),
+                                          "messages": messages + [{"role": "assistant", "content": reply}],
+                                          "score_before": score_before})
 
             state["steps"] = (state["steps"] + [{
                 "iteration": iteration,

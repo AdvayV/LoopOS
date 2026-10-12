@@ -64,6 +64,7 @@ class Loop:
     hint: str = ""
     check: dict[str, Any] = field(default_factory=dict)
     history: list[dict[str, str]] = field(default_factory=list)
+    pending_trace: dict[str, Any] | None = field(default=None, repr=False)  # this iteration, not yet written
     jobs: syscalls.Jobs = field(default_factory=syscalls.Jobs, repr=False)  # commands run on its behalf
 
     PERSISTED = ("iteration", "score", "best_score", "best_iteration", "best_check", "since_best", "restarts",
@@ -376,14 +377,24 @@ class Supervisor:
                      "outcome": outcome, "output": result.get("output", "")[:300]})
         return {"result": result}
 
-    def op_iteration(self, loop: str, iteration: int, action: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+    def op_iteration(self, loop: str, iteration: int, action: dict[str, Any], result: dict[str, Any],
+                     trace: dict[str, Any] | None = None) -> dict[str, Any]:
         item = self._get(loop)
         workspace = Path(item.spec["workspace"])
+        if trace is not None:
+            item.pending_trace = {
+                "loop": loop, "iteration": iteration, "provider": trace.get("provider"), "model": trace.get("model"),
+                "messages": trace.get("messages", []), "action": action, "result_ok": result.get("ok", False),
+                "refused": result.get("refused", False), "score_before": trace.get("score_before", 0.0),
+                "score_after": item.score,
+            }
         if item.status in TERMINAL:
             return self._verdict(item, "stop")
         name = action.get("action")
         check = self._run_check(item) if name in syscalls.MUTATING or name == "finish" else item.check
         current = monitor.score(check["exit_code"], check["output"])
+        if item.pending_trace is not None:
+            item.pending_trace["score_after"] = current
         improved = current > item.best_score
         if improved:
             checkpoint.snapshot(workspace, self._checkpoint_dir(item))
@@ -455,7 +466,16 @@ class Supervisor:
 
     # ---------------------------------------------------------------- internals
 
+    def _write_trace(self, item: Loop, status: str, event: str) -> None:
+        """Append this iteration's record to the loop's trace (once)."""
+        record, item.pending_trace = item.pending_trace, None
+        if record is None:
+            return
+        with open(paths.loop_dir(self.root, item.id) / "trace.jsonl", "a") as trace:
+            trace.write(json.dumps({**record, "event": event, "status": status}) + "\n")
+
     def _verdict(self, item: Loop, directive: str, event: str = "") -> dict[str, Any]:
+        self._write_trace(item, item.status, event)
         return {"directive": directive, "status": item.status, "score": item.score, "check": item.check,
                 "listing": self._listing(item), "hint": item.hint, "event": event}
 
@@ -497,6 +517,7 @@ class Supervisor:
         item.waiting_model = item.holding_model = item.pause_requested = False
         self.scheduler.forget(item.id)
         self._event(item, status, reason, {**(data or {}), "iterations": item.iteration})
+        self._write_trace(item, status, status)
         item.status = status
         self._persist(item)
         self._dispatch()
