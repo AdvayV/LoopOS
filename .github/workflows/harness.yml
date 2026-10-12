@@ -1,0 +1,29 @@
+name: Harness tests
+
+on:
+  push:
+    branches: [main, kaavish_devs]
+    paths: ["harness/**", ".github/workflows/harness.yml"]
+  pull_request:
+    paths: ["harness/**", ".github/workflows/harness.yml"]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        python: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install -e '.[test]'
+        working-directory: harness
+      - run: python -m pytest -q -p no:cacheprovider
+        working-directory: harness
+      - name: Example projects pass their own tests
+        run: for d in examples/*/; do (cd "$d" && python -m pytest -q -p no:cacheprovider); done
+        working-directory: harness
