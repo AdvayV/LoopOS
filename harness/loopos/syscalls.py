@@ -10,6 +10,7 @@ import os
 import shlex
 import signal
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -176,8 +177,11 @@ def run_command(argv: list[str], policy: Policy, *, timeout: int | None = None,
     writable = [str(policy.workspace), tempfile.gettempdir(), "/dev"] if policy.confine_writes else []
     wrapped = sandbox.command(argv, cpu_seconds=policy.cpu_seconds, memory_mb=policy.memory_mb,
                               niceness=policy.niceness, writable=writable)
-    env = {key: os.environ[key] for key in ("PATH", "HOME", "LANG", "TERM", "VIRTUAL_ENV") if key in os.environ}
+    env = {key: os.environ[key] for key in ("PATH", "HOME", "LANG", "TERM") if key in os.environ}
     env["PYTHONDONTWRITEBYTECODE"] = "1"
+    # `python`/`pytest` resolve to the project's .venv if it has one, else to LoopOS's own interpreter.
+    bins = [policy.workspace / ".venv" / "bin", Path(sys.executable).parent]
+    env["PATH"] = os.pathsep.join([str(b) for b in bins if b.is_dir()] + [env.get("PATH", "")])
     limit = float(timeout or policy.command_timeout)
     process = subprocess.Popen(wrapped, cwd=policy.workspace, env=env, stdin=subprocess.DEVNULL,
                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)

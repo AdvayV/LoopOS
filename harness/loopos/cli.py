@@ -2,51 +2,18 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
-import subprocess
 import sys
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from . import dataset, paths
+from . import dataset, paths, tasks
+from .client import daemon_running, request, start_daemon
 from .model import check_ollama
-from .protocol import Connection, LoopOSError
-from .supervisor import DEFAULTS, PACKAGE_ROOT, TERMINAL
-
-
-def connect(root: Path) -> Connection:
-    return Connection(paths.socket_path(root))
-
-
-def request(root: Path, op: str, **fields: Any) -> dict[str, Any]:
-    with connect(root) as conn:
-        return conn.request(op, **fields)
-
-
-def daemon_running(root: Path) -> bool:
-    try:
-        request(root, "ping")
-        return True
-    except LoopOSError:
-        return False
-
-
-def start_daemon(root: Path) -> None:
-    if daemon_running(root):
-        return
-    env = dict(os.environ)
-    env["PYTHONPATH"] = PACKAGE_ROOT + os.pathsep + env.get("PYTHONPATH", "")
-    with open(paths.daemon_log(root), "ab") as log:
-        subprocess.Popen([sys.executable, "-m", "loopos.supervisor", "--home", str(root)], cwd=root, env=env,
-                         stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
-    for _ in range(100):
-        if daemon_running(root):
-            return
-        time.sleep(0.1)
-    raise LoopOSError(f"supervisor did not start; see {paths.daemon_log(root)}")
+from .protocol import LoopOSError
+from .supervisor import DEFAULTS, TERMINAL
 
 
 # ------------------------------------------------------------------ formatting
@@ -210,6 +177,36 @@ def cmd_export(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_tasks(args: argparse.Namespace) -> int:
+    manifest = tasks.make(Path(args.source), Path(args.out), args.count, args.until, args.seed)
+    for task in manifest:
+        print(f"{task['name']}  {task['bug']}")
+    print(f"\nWrote {len(manifest)} tasks to {args.out} (manifest: {Path(args.out) / 'tasks.json'}).")
+    return 0
+
+
+def cmd_bench(args: argparse.Namespace) -> int:
+    spec = {"provider": args.provider, "model": args.model, "ollama_url": args.ollama_url,
+            "max_iters": args.max_iters, "priority": args.priority,
+            "script": str(Path(args.script).resolve()) if args.script else None}
+    if args.provider == "ollama":
+        problem = check_ollama(args.ollama_url, args.model)
+        if problem:
+            raise LoopOSError(problem)
+    summary = tasks.bench(args.root, Path(args.tasks), parallel=args.parallel, spec=spec)
+    rows = [("TASK", "LOOP", "RESULT", "ITER", "SECS", "BUG")]
+    for r in summary["results"]:
+        result = "solved" if r["solved"] else ("edited tests" if r["tampered_tests"] else r["status"])
+        rows.append((r["task"], r["loop"], result, str(r["iterations"]), str(r["seconds"]), r["bug"]))
+    widths = [max(len(row[i]) for row in rows) for i in range(len(rows[0]) - 1)]
+    print("\n".join("  ".join(c.ljust(w) for c, w in zip(row, widths)) + "  " + row[-1] for row in rows))
+    mean = summary["mean_iterations_when_solved"]
+    print(f"\nSolved {summary['solved']}/{summary['tasks']} ({summary['success_rate']:.0%})"
+          + (f", {mean} iterations on average" if mean is not None else "")
+          + f". Details: {summary['run_dir']}/results.json")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="loopos", description="Run agent loops as supervised processes until a done check passes.")
     parser.add_argument("--home", help="state directory (default: $LOOPOS_HOME or ~/.local/state/loopos)")
@@ -258,6 +255,27 @@ def build_parser() -> argparse.ArgumentParser:
         control = commands.add_parser(name, help=text)
         control.add_argument("id")
         control.set_defaults(func=cmd_control)
+
+    task_cmd = commands.add_parser("tasks", help="generate practice tasks by planting bugs in a passing project")
+    task_sub = task_cmd.add_subparsers(dest="tasks_action", required=True)
+    make = task_sub.add_parser("make", help="plant one bug per task")
+    make.add_argument("--from", dest="source", required=True, help="project whose tests pass")
+    make.add_argument("--out", required=True, help="folder for task-NNN/ and tasks.json")
+    make.add_argument("--count", type=int, default=10)
+    make.add_argument("--until", default=tasks.DEFAULT_CHECK, help="check command that must pass before mutation")
+    make.add_argument("--seed", type=int, default=0)
+    make.set_defaults(func=cmd_tasks)
+
+    bench = commands.add_parser("bench", help="run a loop on every task and report the success rate")
+    bench.add_argument("tasks", help="folder created by `loopos tasks make`")
+    bench.add_argument("--parallel", type=int, default=2, help="loops running at once (they share the model)")
+    bench.add_argument("--max-iters", type=int, default=20)
+    bench.add_argument("--priority", type=int, default=DEFAULTS["priority"])
+    bench.add_argument("--provider", choices=["ollama", "scripted"], default=DEFAULTS["provider"])
+    bench.add_argument("--model", default=os.environ.get("LOOPOS_MODEL", DEFAULTS["model"]))
+    bench.add_argument("--ollama-url", default=os.environ.get("OLLAMA_HOST_URL", DEFAULTS["ollama_url"]))
+    bench.add_argument("--script", help="JSON replies for --provider scripted")
+    bench.set_defaults(func=cmd_bench)
 
     export = commands.add_parser("export", help="write a fine-tuning dataset from loop traces")
     export.add_argument("--out", default="loopos-dataset.jsonl")

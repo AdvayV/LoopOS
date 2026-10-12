@@ -55,11 +55,24 @@ Scores come from the done check: exit 0 is 1.0, a pytest summary gives the pass 
 | `loopos logs [ID] [-f] [-n N]` | Event log. |
 | `loopos pause ID`, `resume ID`, `kill ID` | Control a loop. |
 | `loopos daemon start\|stop\|status` | Manage the supervisor. |
+| `loopos tasks make --from DIR --out DIR [--count N]` | Plant one bug per task in a passing project (only bugs the tests catch). |
+| `loopos bench DIR [--parallel N] [--model NAME]` | Run a loop per task; report success rate, iterations, and loops that edited tests. |
 | `loopos export [--out FILE] [--mode success\|all]` | Write a fine-tuning dataset from loop traces. |
 
 State lives in `$LOOPOS_HOME` (default `~/.local/state/loopos`): `loopos.db` (loops and events), and `loops/<id>/` with `spec.json`, `state.json`, `trace.jsonl`, `worker.log` and `checkpoints/`.
 
 Without a model, `--provider scripted --script replies.json` replays a JSON list of actions; this is what the tests use.
+
+## Practice tasks and benchmarks
+
+```bash
+loopos tasks make --from examples/inventory --out ~/loopos-tasks --count 10
+loopos bench ~/loopos-tasks --parallel 2 --model qwen2.5-coder:7b
+```
+
+`tasks make` swaps an operator, flips a comparison, swaps `and`/`or`, or shifts an integer by one, and keeps the task only if the tests now fail. The manifest (`tasks.json`, outside the task folders) records each bug and a hash of every test file. `bench` copies each task to `$LOOPOS_HOME/bench/<time>/`, runs loops (sharing the model through the scheduler), counts a task as solved only if the check passes **and** the tests are unchanged, and writes `results.json`. Use it to compare models, and to generate traces for training.
+
+Loop commands find `python` and `pytest` in the workspace's `.venv/bin` first, then next to the interpreter running LoopOS.
 
 ## Training data
 
@@ -71,7 +84,7 @@ Every iteration is appended to `loops/<id>/trace.jsonl` as `{"messages": [system
 .venv/bin/python -m pytest -q
 ```
 
-Integration tests start a real supervisor and worker processes and cover: reaching done, refused actions, verified `finish`, livelock recovery and give-up with rollback, budgets, crash restart, hang detection, pause/resume with `SIGSTOP`, kill, an unreachable model, supervisor restart recovery, and dataset export.
+Integration tests start a real supervisor and worker processes and cover: reaching done, refused actions, verified `finish`, livelock recovery and give-up with rollback, budgets, crash restart, hang detection, pause/resume with `SIGSTOP`, kill, an unreachable model, supervisor restart recovery, commands reached by pause and kill, task generation, benchmarking (including test tampering), and dataset export.
 
 ## Limits
 
