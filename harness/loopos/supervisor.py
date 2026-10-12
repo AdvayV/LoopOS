@@ -482,8 +482,8 @@ class Supervisor:
     def _event(self, item: Loop | None, kind: str, message: str, data: dict[str, Any] | None = None) -> None:
         self.store.event(item.id if item else None, kind, message, data)
 
-    def _persist(self, item: Loop) -> None:
-        self.store.save_loop(item.id, item.spec, item.status, item.info())
+    def _persist(self, item: Loop, status: str | None = None) -> None:
+        self.store.save_loop(item.id, item.spec, status or item.status, item.info())
 
     def _checkpoint_dir(self, item: Loop) -> Path:
         return paths.loop_dir(self.root, item.id) / "checkpoints" / "best"
@@ -518,8 +518,8 @@ class Supervisor:
         self.scheduler.forget(item.id)
         self._event(item, status, reason, {**(data or {}), "iterations": item.iteration})
         self._write_trace(item, status, status)
+        self._persist(item, status)
         item.status = status
-        self._persist(item)
         self._dispatch()
 
     def _pause_now(self, item: Loop, reason: str, note: str | None = None) -> None:
@@ -531,8 +531,8 @@ class Supervisor:
         item.jobs.paused = True
         item.jobs.signal(signal.SIGSTOP)
         self._event(item, "pause", reason)
+        self._persist(item, "paused")
         item.status = "paused"
-        self._persist(item)
         self._dispatch()
 
     def _dispatch(self) -> None:

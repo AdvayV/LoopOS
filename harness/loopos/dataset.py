@@ -36,10 +36,26 @@ def is_validation(loop_id: str, fraction: float) -> bool:
     return bucket < fraction
 
 
+FINAL = {"done", "gave_up", "budget", "stopped", "failed"}
+
+
+def loop_outcomes(root: Path) -> dict[str, str]:
+    """Each loop's final status, read from its own trace (the last record of a finished loop carries
+    it), falling back to the database. Traces copied from another machine need no database."""
+    outcomes: dict[str, str] = {}
+    database = paths.database(root)
+    if database.exists():
+        outcomes.update({loop["id"]: loop["status"] for loop in Store(database).loops()})
+    for record in _traces(root):
+        if record.get("status") in FINAL:
+            outcomes[record["loop"]] = record["status"]
+    return outcomes
+
+
 def export(root: Path, out: Path, mode: str = "success", val_fraction: float = 0.0) -> dict[str, int]:
     """Write training examples to `out`; with `val_fraction`, a held-aside share of loops goes to
     `<out stem>.val.jsonl` instead."""
-    statuses = {loop["id"]: loop["status"] for loop in Store(paths.database(root)).loops()}
+    statuses = loop_outcomes(root)
     seen: set[str] = set()
     counts = {"read": 0, "written": 0, "validation": 0, "duplicates": 0}
     val_path = out.with_name(out.stem + ".val" + out.suffix)

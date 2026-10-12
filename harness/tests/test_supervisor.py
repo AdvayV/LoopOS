@@ -198,3 +198,14 @@ def test_dataset_export_can_hold_loops_aside_for_validation(harness, workspace, 
     assert counts == {"read": 2, "written": 0, "validation": 2, "duplicates": 0}
     assert out.read_text() == "" and len((tmp_path / "data.val.jsonl").read_text().splitlines()) == 2
     assert dataset.is_validation("l1", 0.0) is False and dataset.is_validation("l1", 1.0) is True
+
+
+def test_export_works_from_traces_alone(harness, workspace, tmp_path):
+    harness.wait(harness.run(workspace, [READ, FIX]))
+    copy = tmp_path / "copied-home"
+    (copy / "loops").mkdir(parents=True)
+    for trace in (harness.root / "loops").glob("*/trace.jsonl"):  # e.g. traces fetched from the VM
+        (copy / "loops" / trace.parent.name).mkdir()
+        (copy / "loops" / trace.parent.name / "trace.jsonl").write_bytes(trace.read_bytes())
+    counts = dataset.export(copy, tmp_path / "data.jsonl")
+    assert counts["read"] == 2 and counts["written"] == 2  # the read step is kept: the loop reached done
