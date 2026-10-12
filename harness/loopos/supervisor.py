@@ -34,7 +34,7 @@ from .store import Store
 
 TERMINAL = {"done", "stopped", "gave_up", "budget", "failed"}
 DEFAULTS: dict[str, Any] = {
-    "priority": 5, "max_iters": 30, "max_minutes": 60, "provider": "ollama", "model": "qwen2.5-coder:7b",
+    "priority": 5, "max_iters": 30, "max_minutes": 60, "provider": "ollama", "model": "qwen2.5-coder:3b",
     "model_url": None, "allow": list(syscalls.DEFAULT_ALLOW), "command_timeout": 120,
     "check_timeout": 300, "memory_mb": 2048, "model_timeout": 600,
 }
@@ -236,7 +236,7 @@ class Supervisor:
             busy = [l.id for l in self.loops.values()
                     if l.status not in TERMINAL and l.spec["workspace"] == spec["workspace"]]
             if busy:
-                raise LoopOSError(f"loop {busy[0]} is already working in {workspace}")
+                raise LoopOSError(f"loop {busy[0]} is already working in that folder (watch {busy[0]})")
             loop_id = self.store.next_loop_id()
             directory = paths.loop_dir(self.root, loop_id)
             (directory / "spec.json").write_text(json.dumps(spec, indent=2))

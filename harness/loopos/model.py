@@ -12,7 +12,6 @@ from typing import Any, Protocol
 from .syscalls import ACTION_SCHEMA
 
 DEFAULT_URLS = {"ollama": "http://localhost:11434", "openai": "http://localhost:8080/v1"}
-SERVE_HINT = "or open the VM with `loopos-vm up` then `loopos-vm tunnel`"
 
 
 class ProviderError(Exception):
@@ -101,14 +100,14 @@ def check_model(provider: str, url: str | None, model: str, timeout: float = 5) 
             listing = _http_json(f"{url}/models", timeout=timeout,
                                  headers={"Authorization": f"Bearer {key}"} if key else None)
             names = {m.get("id", "") for m in listing.get("data", [])}
-    except ProviderError as exc:
-        start = "start it with `ollama serve`" if provider == "ollama" else "start llama-server or vLLM"
-        return f"{exc}. Is the model server running? Locally, {start}; {SERVE_HINT}"
+    except ProviderError:
+        start = "ollama serve" if provider == "ollama" else "llama-server or vLLM"
+        return f"no model server at {url}  ·  start {start}, or the VM: loopos-vm up && loopos-vm tunnel"
     wanted = model if provider != "ollama" or ":" in model else f"{model}:latest"
     if wanted not in names:
-        available = ", ".join(sorted(names)) or "none"
-        fix = f" Pull it with `ollama pull {model}`." if provider == "ollama" else ""
-        return f"model {model!r} is not served at {url} (available: {available}).{fix}"
+        get = f"ollama pull {model}" if provider == "ollama" else "load it on the server"
+        have = ", ".join(sorted(names)[:4]) or "none"
+        return f"{model} isn't on the server  ·  {get}, or pick one with: loopos model NAME (have: {have})"
     return ""
 
 

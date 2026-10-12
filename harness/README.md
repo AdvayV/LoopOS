@@ -2,11 +2,19 @@
 
 Start a loop with a goal and a done check, then walk away. A worker process asks a model for one action at a time; the supervisor checks and performs each action, runs the done check itself, and keeps the loop on track until the check passes or a budget runs out.
 
-Type `loopos` on its own for the interactive prompt under the LoopOS logo, or use any command directly:
+Type `loopos` on its own for the interactive prompt under the LoopOS logo, or use the short commands directly:
 
 ```bash
-loopos run --goal "make the tests pass" --until "pytest -q" --workspace ./myproject
+loopos run                    # in a project folder: goal and done check are worked out
+loopos run myproject          # another folder
+loopos run "fix the login"    # with a goal
+loopos ps                     # loops at a glance
+loopos watch l1               # follow one live
+loopos stop l1                # pause l1 / resume l1 / show l1 / logs l1 work the same way
+loopos model qwen2.5-coder:7b # choose the model once; it is remembered
 ```
+
+The done check is detected from the project: `pytest -q` for Python tests, `npm test`, `make test`, `cargo test` or `go test ./...`; pass `-u CMD` for anything else. Options such as `-p 8` (priority), `-n 10` (iterations) and `-d` (start and return) are there when needed.
 
 `run` then shows the loop live, one line per iteration as it completes, with a spinner for what it is doing now:
 
@@ -66,29 +74,31 @@ Scores come from the done check: exit 0 is 1.0, a pytest summary gives the pass 
 
 | Command | |
 |---|---|
-| `loopos` | Interactive prompt: type any command below without the `loopos` prefix; `help`, `clear`, `exit`. |
-| `loopos run --goal G --until CMD [--workspace DIR] [--priority 0-10] [--max-iters N] [--max-minutes M] [--model NAME] [--allow PROGRAM] [-d]` | Start a loop and watch it (starts the supervisor if needed); `-d` returns immediately. |
-| `loopos watch ID` | Follow a loop live, one line per iteration. |
-| `loopos ps [-a]`, `loopos top`, `loopos show ID` | Inspect loops. |
-| `loopos logs [ID] [-f] [--raw] [-n N]` | A loop's story; without an ID or with `--raw`, the raw supervisor event log. |
-| `loopos pause ID`, `resume ID`, `kill ID` | Control a loop. |
-| `loopos daemon start\|stop\|status` | Manage the supervisor. |
-| `loopos tasks make --from DIR --out DIR [--count N]` | Plant one bug per task in a passing project (only bugs the tests catch). |
-| `loopos bench DIR [--parallel N] [--model NAME]` | Run a loop per task; report success rate, iterations, and loops that edited tests. |
-| `loopos export [--out FILE] [--mode success\|all]` | Write a fine-tuning dataset from loop traces. |
+| `loopos` | Interactive prompt: the same commands without the `loopos` prefix; `help`, `clear`, `exit`. |
+| `loopos run [DIR] ["GOAL"]` | Start a loop and watch it. `-u CMD` check, `-p N` priority, `-n N` iterations, `-d` detach, `-m MODEL`. |
+| `loopos watch ID` | Follow a loop live. |
+| `loopos ps [-a]` · `loopos top` · `loopos show ID` · `loopos logs ID` | Inspect loops (`logs --raw` for every supervisor event). |
+| `loopos pause ID` · `resume ID` · `stop ID` | Control a loop (`SIGSTOP`, `SIGCONT`, `SIGKILL`). |
+| `loopos model [NAME]` · `loopos config [KEY VALUE]` | Show or set remembered defaults: model, provider, url, priority, iters. |
+| `loopos tasks DIR` | Plant bugs in a passing project → `DIR-tasks/` (`-n` count). |
+| `loopos bench DIR` | Score the model on those tasks (`-j` loops at once). |
+| `loopos export [FILE]` | Write a fine-tuning dataset from loop traces. |
+| `loopos daemon start\|stop\|status` | Manage the supervisor (normally automatic). |
+
+Settings come from, in order: a flag, an environment variable (`LOOPOS_MODEL`, `LOOPOS_PROVIDER`, `LOOPOS_MODEL_URL`, `LOOPOS_PRIORITY`), `loopos config`, then the built-in default.
 
 State lives in `$LOOPOS_HOME` (default `~/.local/state/loopos`): `loopos.db` (loops and events), and `loops/<id>/` with `spec.json`, `state.json`, `trace.jsonl`, `worker.log` and `checkpoints/`.
 
-Without a model, `--provider scripted --script replies.json` replays a JSON list of actions (`--script-delay` adds thinking time); this is what the tests use. `examples/demo.sh` tours every feature this way.
+Without a model, `--script replies.json` replays a JSON list of actions instead (`--delay` adds thinking time, or set `LOOPOS_SCRIPT`); this is what the tests use. `examples/demo.sh` tours every feature this way.
 
 ## Practice tasks and benchmarks
 
 ```bash
-loopos tasks make --from examples/inventory --out ~/loopos-tasks --count 10
-loopos bench ~/loopos-tasks --parallel 2 --model qwen2.5-coder:7b
+loopos tasks examples/inventory     # -> inventory-tasks/
+loopos bench inventory-tasks
 ```
 
-`tasks make` swaps an operator, flips a comparison, swaps `and`/`or`, or shifts an integer by one, and keeps the task only if the tests now fail. The manifest (`tasks.json`, outside the task folders) records each bug and a hash of every test file. `bench` copies each task to `$LOOPOS_HOME/bench/<time>/`, runs loops (sharing the model through the scheduler), counts a task as solved only if the check passes **and** the tests are unchanged, and writes `results.json`. Use it to compare models, and to generate traces for training.
+`tasks` swaps an operator, flips a comparison, swaps `and`/`or`, or shifts an integer by one, and keeps the task only if the tests now fail. The manifest (`tasks.json`, outside the task folders) records each bug and a hash of every test file. `bench` copies each task to `$LOOPOS_HOME/bench/<time>/`, runs loops (sharing the model through the scheduler), counts a task as solved only if the check passes **and** the tests are unchanged, and writes `results.json`. Use it to compare models, and to generate traces for training.
 
 Loop commands find `python` and `pytest` in the workspace's `.venv/bin` first, then next to the interpreter running LoopOS.
 

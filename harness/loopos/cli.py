@@ -14,9 +14,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from . import dataset, paths, tasks, ui
+from . import config, dataset, paths, tasks, ui
 from .client import daemon_running, request, start_daemon
 from .model import check_model
+from .project import detect_check
 from .protocol import LoopOSError
 from .supervisor import DEFAULTS, TERMINAL
 
@@ -97,23 +98,49 @@ def cmd_daemon(args: argparse.Namespace) -> int:
     return 0
 
 
+def model_spec(args: argparse.Namespace) -> dict[str, Any]:
+    """Provider settings from flags, environment and `loopos config`; --script implies scripted replies."""
+    script = args.script or os.environ.get("LOOPOS_SCRIPT")
+    delay = args.delay if args.delay is not None else float(os.environ.get("LOOPOS_SCRIPT_DELAY") or 0)
+    provider = "scripted" if script else config.resolve(args.root, "provider", args.provider)[0]
+    if provider == "scripted" and not script:
+        raise LoopOSError("scripted replies need --script FILE")
+    return {"provider": provider, "model": config.resolve(args.root, "model", args.model)[0],
+            "model_url": config.resolve(args.root, "url", args.url)[0],
+            "script": str(Path(script).resolve()) if script else None, "script_delay": delay or None}
+
+
+def require_model(spec: dict[str, Any], skip: bool = False) -> None:
+    if spec["provider"] == "scripted" or skip:
+        return
+    problem = check_model(spec["provider"], spec["model_url"], spec["model"])
+    if problem:
+        raise LoopOSError(problem)
+
+
 def cmd_run(args: argparse.Namespace) -> int:
+    words = list(args.words)
+    workspace = Path(args.workspace) if args.workspace else None
+    if words and workspace is None and Path(words[0]).is_dir():
+        workspace = Path(words.pop(0))  # `loopos run myproject`
+    workspace = (workspace or Path(".")).resolve()
+    until = args.until or detect_check(workspace)
+    if not until:
+        raise LoopOSError(f"can't tell how to check {ui.short_path(str(workspace))}; "
+                          "say how with -u, e.g. run -u \"make test\"")
     spec = {
-        "goal": args.goal, "until": args.until, "workspace": str(Path(args.workspace).resolve()),
-        "priority": args.priority, "max_iters": args.max_iters, "max_minutes": args.max_minutes,
-        "provider": args.provider, "model": args.model, "model_url": args.model_url,
-        "script": str(Path(args.script).resolve()) if args.script else None,
-        "script_delay": args.script_delay,
+        "goal": " ".join(words) or args.goal or f"Make `{until}` pass", "until": until, "workspace": str(workspace),
+        "priority": config.resolve(args.root, "priority", args.priority)[0],
+        "max_iters": config.resolve(args.root, "iters", args.iters)[0],
+        "max_minutes": args.minutes or DEFAULTS["max_minutes"],
         "allow": sorted(set(DEFAULTS["allow"]) | set(args.allow or [])),
+        **model_spec(args),
     }
-    if args.provider != "scripted" and not args.no_model_check:
-        problem = check_model(args.provider, args.model_url, args.model)
-        if problem:
-            raise LoopOSError(problem)
+    require_model(spec, args.no_check)
     start_daemon(args.root)
     loop_id = request(args.root, "run", spec=spec)["id"]
     if args.detach or not style.tty:
-        say(f"  {style.accent('▸')} started {style.accent(loop_id)}" + style.dim(f"  ·  watch {loop_id}  ·  ps"))
+        say(f"  {style.accent('▸')} started {style.accent(loop_id)}" + style.dim(f"  ·  watch {loop_id}"))
         return 0
     say()
     return watch(args.root, loop_id)
@@ -192,39 +219,67 @@ def cmd_logs(args: argparse.Namespace) -> int:
 
 
 def cmd_control(args: argparse.Namespace) -> int:
-    reply = request(args.root, args.command, loop=args.id)
+    op = "kill" if args.command == "stop" else args.command
+    reply = request(args.root, op, loop=args.id)
     if reply.get("pending"):
         say(f"  {style.yellow('⏸')} {args.id} pauses when its current model turn ends")
     else:
-        icon = {"pause": style.yellow("⏸"), "resume": style.accent("▶"), "kill": style.red("■")}[args.command]
-        say(f"  {icon} {args.id} " + {"pause": "paused", "resume": "resumed", "kill": "stopped"}[args.command])
+        icon = {"pause": style.yellow("⏸"), "resume": style.accent("▶"), "kill": style.red("■")}[op]
+        say(f"  {icon} {args.id} " + {"pause": "paused", "resume": "resumed", "kill": "stopped"}[op])
+    return 0
+
+
+def cmd_model(args: argparse.Namespace) -> int:
+    if args.name:
+        config.set_value(args.root, "model", args.name)
+    model, source = config.resolve(args.root, "model")
+    provider, _ = config.resolve(args.root, "provider")
+    url, _ = config.resolve(args.root, "url")
+    say(f"  {style.accent('◆')} {model}" + style.dim(f"  ·  {provider}"
+                                                       f"{' at ' + url if url else ''}  ·  {source}"))
+    return 0
+
+
+def cmd_config(args: argparse.Namespace) -> int:
+    if args.key and args.value is None:
+        raise LoopOSError(f"give a value: config {args.key} VALUE  (or VALUE = default)")
+    if args.key:
+        try:
+            config.set_value(args.root, args.key, args.value)
+        except config.ConfigError as exc:
+            raise LoopOSError(str(exc)) from exc
+    for key in config.SETTINGS:
+        value, source = config.resolve(args.root, key)
+        say(f"  {style.accent(key.ljust(9))}{str(value if value is not None else '-'):<28}" + style.dim(source))
     return 0
 
 
 def cmd_export(args: argparse.Namespace) -> int:
-    counts = dataset.export(args.root, Path(args.out), args.mode)
-    say(f"  {style.green('✓')} {counts['written']} training examples → {ui.short_path(str(Path(args.out).resolve()))}"
+    out = Path(args.out)
+    counts = dataset.export(args.root, out, "all" if args.all else "success")
+    say(f"  {style.green('✓')} {counts['written']} training examples → {ui.short_path(str(out.resolve()))}"
         + style.dim(f"   (from {counts['read']} iterations, {counts['duplicates']} duplicates skipped)"))
     return 0
 
 
 def cmd_tasks(args: argparse.Namespace) -> int:
-    manifest = tasks.make(Path(args.source), Path(args.out), args.count, args.until, args.seed)
+    source = Path(args.source).resolve()
+    out = Path(args.out or f"{source.name}-tasks")
+    try:
+        manifest = tasks.make(source, out, args.count, args.until, args.seed)
+    except ValueError as exc:
+        raise LoopOSError(str(exc)) from exc
     for task in manifest:
         say(f"  {style.accent('•')} {task['name']}  " + style.dim(task["bug"]))
-    say(f"\n  {style.green('✓')} {len(manifest)} tasks → {ui.short_path(str(Path(args.out).resolve()))}")
+    say(f"\n  {style.green('✓')} {len(manifest)} tasks → {ui.short_path(str(out.resolve()))}"
+        + style.dim(f"   next: loopos bench {args.out or out.name}"))
     return 0
 
 
 def cmd_bench(args: argparse.Namespace) -> int:
-    spec = {"provider": args.provider, "model": args.model, "model_url": args.model_url,
-            "max_iters": args.max_iters, "priority": args.priority,
-            "script": str(Path(args.script).resolve()) if args.script else None,
-            "script_delay": args.script_delay}
-    if args.provider != "scripted":
-        problem = check_model(args.provider, args.model_url, args.model)
-        if problem:
-            raise LoopOSError(problem)
+    spec = {**model_spec(args), "max_iters": args.iters,
+            "priority": config.resolve(args.root, "priority", args.priority)[0]}
+    require_model(spec)
     line, frame = ui.LiveLine(style), [0]
 
     def progress(kind: str, info: dict[str, Any]) -> None:
@@ -242,7 +297,8 @@ def cmd_bench(args: argparse.Namespace) -> int:
             line.draw("    " + style.accent(ui.SPINNER[frame[0] % len(ui.SPINNER)]) + " "
                       + style.dim("running " + ", ".join(info["running"])))
 
-    say(style.dim(f"  benchmarking {ui.short_path(str(Path(args.tasks).resolve()))}  ·  {args.parallel} at a time\n"))
+    model = "scripted replies" if spec["provider"] == "scripted" else spec["model"]
+    say(style.dim(f"  {model}  ·  {args.parallel} at a time\n"))
     summary = tasks.bench(args.root, Path(args.tasks), parallel=args.parallel, spec=spec, poll=0.25, progress=progress)
     line.clear()
     mean = summary["mean_iterations_when_solved"]
@@ -265,99 +321,106 @@ class ShellParser(argparse.ArgumentParser):
         raise ShellError(f"{message}  ·  {self.prog.removeprefix('loopos').strip() or 'command'} --help for options")
 
 
+def add_model_flags(parser: argparse.ArgumentParser) -> None:
+    group = parser.add_argument_group("model (defaults come from `loopos model` / `loopos config`)")
+    group.add_argument("-m", "--model")
+    group.add_argument("--provider", choices=config.PROVIDERS)
+    group.add_argument("--url", "--model-url", dest="url", help="model server URL")
+    group.add_argument("--script", help="replay JSON replies instead of a model")
+    group.add_argument("--delay", "--script-delay", dest="delay", type=float, help="seconds per scripted reply")
+    group.add_argument("-p", "--priority", type=int, help="0-10, higher gets the model first")
+
+
 def build_parser(parser_class: type[argparse.ArgumentParser] = argparse.ArgumentParser) -> argparse.ArgumentParser:
-    parser = parser_class(prog="loopos", description="Run agent loops as supervised processes until a done check passes.")
+    parser = parser_class(prog="loopos", description="Run agent loops as supervised processes until a done check passes. "
+                                                     "Run with no command for the interactive prompt.")
     parser.add_argument("--home", help="state directory (default: $LOOPOS_HOME or ~/.local/state/loopos)")
-    commands = parser.add_subparsers(dest="command")
+    commands = parser.add_subparsers(dest="command", metavar="COMMAND")
 
-    daemon = commands.add_parser("daemon", help="start, stop or check the supervisor")
-    daemon.add_argument("action", choices=["start", "stop", "status"])
-    daemon.set_defaults(func=cmd_daemon)
-
-    run = commands.add_parser("run", help="start a loop and watch it")
-    run.add_argument("--goal", required=True, help="what the loop should achieve")
-    run.add_argument("--until", required=True, help="done check command; the loop ends when it exits 0")
-    run.add_argument("--workspace", default=".", help="folder the loop may read and change (default: .)")
-    run.add_argument("--priority", type=int, default=DEFAULTS["priority"], help="0-10, higher gets the model first")
-    run.add_argument("--max-iters", type=int, default=DEFAULTS["max_iters"])
-    run.add_argument("--max-minutes", type=float, default=DEFAULTS["max_minutes"])
-    run.add_argument("--provider", choices=["ollama", "openai", "scripted"], default=DEFAULTS["provider"],
-                     help="ollama, an OpenAI-compatible server (llama-server, vLLM), or scripted replies")
-    run.add_argument("--model", default=os.environ.get("LOOPOS_MODEL", DEFAULTS["model"]))
-    run.add_argument("--model-url", default=os.environ.get("LOOPOS_MODEL_URL"),
-                     help="model server URL (default: localhost:11434 for ollama, localhost:8080/v1 for openai)")
-    run.add_argument("--script", help="JSON list of replies for --provider scripted")
-    run.add_argument("--script-delay", type=float, help="seconds each scripted reply takes (simulated thinking)")
+    run = commands.add_parser("run", help="start a loop and watch it: run · run DIR · run \"goal\"")
+    run.add_argument("words", nargs="*", metavar="[DIR] [GOAL]",
+                     help="folder to work in (default: here) and what to achieve (default: make the check pass)")
+    run.add_argument("-w", "--workspace", help="folder to work in")
+    run.add_argument("-u", "--until", help="done check command (default: detected, e.g. pytest -q)")
+    run.add_argument("--goal", help=argparse.SUPPRESS)
+    run.add_argument("-n", "--iters", "--max-iters", dest="iters", type=int, help="iteration budget (default 30)")
+    run.add_argument("--minutes", "--max-minutes", dest="minutes", type=float, help="time budget (default 60)")
     run.add_argument("--allow", action="append", metavar="PROGRAM", help="extra program the loop may run")
-    run.add_argument("--no-model-check", action="store_true", help="start even if the model is unreachable now")
-    run.add_argument("-d", "--detach", action="store_true", help="start the loop and return immediately")
+    run.add_argument("--no-check", "--no-model-check", dest="no_check", action="store_true",
+                     help="start even if the model is unreachable now")
+    run.add_argument("-d", "--detach", action="store_true", help="start and return immediately")
+    add_model_flags(run)
     run.set_defaults(func=cmd_run)
 
-    watch_cmd = commands.add_parser("watch", help="follow a loop live, one line per iteration")
-    watch_cmd.add_argument("id")
-    watch_cmd.set_defaults(func=cmd_watch)
+    for name, text, func in (("watch", "follow a loop live", cmd_watch), ("show", "details of a loop", cmd_show)):
+        command = commands.add_parser(name, help=text)
+        command.add_argument("id")
+        command.set_defaults(func=func)
 
-    ps = commands.add_parser("ps", help="list loops")
-    ps.add_argument("-a", "--all", action="store_true", help="include finished loops")
+    ps = commands.add_parser("ps", help="list loops (-a: include finished)")
+    ps.add_argument("-a", "--all", action="store_true")
     ps.set_defaults(func=cmd_ps)
 
-    top = commands.add_parser("top", help="live view of all loops and scheduler decisions")
+    top = commands.add_parser("top", help="live view of all loops")
     top.add_argument("--interval", type=float, default=1)
     top.set_defaults(func=cmd_top)
 
-    show = commands.add_parser("show", help="details of one loop")
-    show.add_argument("id")
-    show.set_defaults(func=cmd_show)
-
-    logs = commands.add_parser("logs", help="a loop's story (or the raw event log)")
+    logs = commands.add_parser("logs", help="a loop's story, or the raw event log")
     logs.add_argument("id", nargs="?")
     logs.add_argument("-f", "--follow", action="store_true")
     logs.add_argument("--raw", action="store_true", help="every supervisor event, unformatted")
     logs.add_argument("-n", "--lines", type=int, default=50)
     logs.set_defaults(func=cmd_logs)
 
-    for name, text in (("pause", "freeze a loop (SIGSTOP) at a safe point"),
-                       ("resume", "continue a paused loop (SIGCONT)"), ("kill", "stop a loop for good")):
+    for name, text in (("pause", "freeze a loop (SIGSTOP)"), ("resume", "continue a paused loop (SIGCONT)"),
+                       ("stop", "stop a loop for good"), ("kill", argparse.SUPPRESS)):
         control = commands.add_parser(name, help=text)
         control.add_argument("id")
         control.set_defaults(func=cmd_control)
 
-    task_cmd = commands.add_parser("tasks", help="generate practice tasks by planting bugs in a passing project")
-    task_sub = task_cmd.add_subparsers(dest="tasks_action", required=True)
-    make = task_sub.add_parser("make", help="plant one bug per task")
-    make.add_argument("--from", dest="source", required=True, help="project whose tests pass")
-    make.add_argument("--out", required=True, help="folder for task-NNN/ and tasks.json")
-    make.add_argument("--count", type=int, default=10)
-    make.add_argument("--until", default=tasks.DEFAULT_CHECK, help="check command that must pass before mutation")
-    make.add_argument("--seed", type=int, default=0)
-    make.set_defaults(func=cmd_tasks)
+    model = commands.add_parser("model", help="show or choose the model: model · model NAME")
+    model.add_argument("name", nargs="?")
+    model.set_defaults(func=cmd_model)
 
-    bench = commands.add_parser("bench", help="run a loop on every task and report the success rate")
-    bench.add_argument("tasks", help="folder created by `loopos tasks make`")
-    bench.add_argument("--parallel", type=int, default=2, help="loops running at once (they share the model)")
-    bench.add_argument("--max-iters", type=int, default=20)
-    bench.add_argument("--priority", type=int, default=DEFAULTS["priority"])
-    bench.add_argument("--provider", choices=["ollama", "openai", "scripted"], default=DEFAULTS["provider"])
-    bench.add_argument("--model", default=os.environ.get("LOOPOS_MODEL", DEFAULTS["model"]))
-    bench.add_argument("--model-url", default=os.environ.get("LOOPOS_MODEL_URL"))
-    bench.add_argument("--script", help="JSON replies for --provider scripted")
-    bench.add_argument("--script-delay", type=float, help="seconds each scripted reply takes")
+    settings = commands.add_parser("config", help="show or set defaults: config · config KEY VALUE")
+    settings.add_argument("key", nargs="?", choices=list(config.SETTINGS))
+    settings.add_argument("value", nargs="?")
+    settings.set_defaults(func=cmd_config)
+
+    task_cmd = commands.add_parser("tasks", help="plant bugs in a passing project: tasks DIR")
+    task_cmd.add_argument("source", metavar="DIR", help="project whose tests pass")
+    task_cmd.add_argument("-o", "--out", help="output folder (default: DIR-tasks)")
+    task_cmd.add_argument("-n", "--count", type=int, default=10)
+    task_cmd.add_argument("-u", "--until", default=tasks.DEFAULT_CHECK, help="check that must pass before mutation")
+    task_cmd.add_argument("--seed", type=int, default=0)
+    task_cmd.set_defaults(func=cmd_tasks)
+
+    bench = commands.add_parser("bench", help="score the model on practice tasks: bench DIR")
+    bench.add_argument("tasks", metavar="DIR", help="folder made by `loopos tasks`")
+    bench.add_argument("-j", "--parallel", type=int, default=2, help="loops at once (default 2)")
+    bench.add_argument("-n", "--iters", type=int, default=20, help="iteration budget per task (default 20)")
+    add_model_flags(bench)
     bench.set_defaults(func=cmd_bench)
 
-    export = commands.add_parser("export", help="write a fine-tuning dataset from loop traces")
-    export.add_argument("--out", default="loopos-dataset.jsonl")
-    export.add_argument("--mode", choices=["success", "all"], default="success")
+    export = commands.add_parser("export", help="write training data: export [FILE]")
+    export.add_argument("out", nargs="?", default="loopos-dataset.jsonl")
+    export.add_argument("--all", action="store_true", help="every iteration, not just useful ones")
     export.set_defaults(func=cmd_export)
+
+    daemon = commands.add_parser("daemon", help="supervisor: daemon start|stop|status")
+    daemon.add_argument("action", choices=["start", "stop", "status"])
+    daemon.set_defaults(func=cmd_daemon)
     return parser
 
 
 SHELL_HELP = [
-    ("run --goal \"…\" --until \"pytest -q\"", "start a loop and watch its iterations"),
-    ("watch ID", "follow a running loop"),
-    ("ps  ·  ps -a", "running loops  ·  all loops"),
-    ("show ID  ·  logs ID", "details  ·  the full story"),
-    ("pause ID  ·  resume ID  ·  kill ID", "control a loop"),
-    ("top", "live view of everything"),
+    ("run", "start a loop here and watch it"),
+    ("run DIR  ·  run \"goal\"", "another folder  ·  with a goal"),
+    ("ps  ·  top", "list loops  ·  live view"),
+    ("watch ID  ·  show ID  ·  logs ID", "follow  ·  details  ·  story"),
+    ("pause ID  ·  resume ID  ·  stop ID", "control a loop"),
+    ("model NAME", "choose the model (remembered)"),
+    ("tasks DIR  ·  bench DIR", "practice tasks  ·  score the model"),
     ("help  ·  clear  ·  exit", ""),
 ]
 

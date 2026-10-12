@@ -74,8 +74,8 @@ def test_ps_table_lists_state_progress_and_goal():
 def test_shell_parser_reports_errors_in_one_line():
     parser = build_parser(ShellParser)
     try:
-        parser.parse_args(["run", "--goal", "x"])
+        parser.parse_args(["run", "-n", "lots"])
     except ShellError as exc:
-        assert "--until" in str(exc) and "run --help" in str(exc)
+        assert "invalid int value" in str(exc) and "run --help" in str(exc)
     else:
         raise AssertionError("expected a ShellError")

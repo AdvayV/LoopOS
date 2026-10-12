@@ -183,7 +183,7 @@ def test_paused_jobs_do_not_time_out(policy):
 
 def test_check_model_explains_problems():
     from loopos.model import check_model
-    assert "Is the model server running?" in check_model("ollama", "http://127.0.0.1:9", "m", timeout=1)
+    assert "no model server" in check_model("ollama", "http://127.0.0.1:9", "m", timeout=1)
     assert "llama-server" in check_model("openai", "http://127.0.0.1:9/v1", "m", timeout=1)
 
 
@@ -230,6 +230,6 @@ def test_http_providers_send_the_schema_and_parse_replies():
         assert seen[1][0] == "/v1/chat/completions"
         assert seen[1][1]["response_format"]["json_schema"]["schema"]["required"] == ["action", "reason"]
         assert check_model("ollama", base, "tiny") == "" and check_model("openai", base + "/v1", "tiny") == ""
-        assert "not served" in check_model("openai", base + "/v1", "other")
+        assert "isn't on the server" in check_model("openai", base + "/v1", "other")
     finally:
         server.shutdown()
