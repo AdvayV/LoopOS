@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -116,21 +117,24 @@ class ScriptedProvider:
 
     After the list runs out, the last reply repeats (useful for exercising the livelock watchdog).
     `start` skips replies already used, so a restarted worker continues where it left off.
+    `delay` simulates model thinking time, so loops visibly compete for model turns.
     """
 
     name = "scripted"
 
-    def __init__(self, replies: list[Any], start: int = 0) -> None:
+    def __init__(self, replies: list[Any], start: int = 0, delay: float = 0.0) -> None:
         if not replies:
             raise ProviderError("scripted provider needs at least one reply")
         self.replies = [r if isinstance(r, str) else json.dumps(r) for r in replies]
         self.calls = start
+        self.delay = delay
 
     @classmethod
-    def from_file(cls, path: str | Path, start: int = 0) -> "ScriptedProvider":
-        return cls(json.loads(Path(path).read_text()), start)
+    def from_file(cls, path: str | Path, start: int = 0, delay: float = 0.0) -> "ScriptedProvider":
+        return cls(json.loads(Path(path).read_text()), start, delay)
 
     def complete(self, messages: list[dict[str, str]]) -> str:
+        time.sleep(self.delay)
         reply = self.replies[min(self.calls, len(self.replies) - 1)]
         self.calls += 1
         return reply
@@ -139,7 +143,7 @@ class ScriptedProvider:
 def make_provider(spec: dict[str, Any], calls_made: int = 0) -> Provider:
     kind = spec.get("provider", "ollama")
     if kind == "scripted":
-        return ScriptedProvider.from_file(spec["script"], start=calls_made)
+        return ScriptedProvider.from_file(spec["script"], start=calls_made, delay=float(spec.get("script_delay") or 0))
     if kind not in DEFAULT_URLS:
         raise ProviderError(f"unknown provider {kind!r}")
     cls = OllamaProvider if kind == "ollama" else OpenAIProvider

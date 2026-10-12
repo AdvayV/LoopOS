@@ -78,6 +78,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         "priority": args.priority, "max_iters": args.max_iters, "max_minutes": args.max_minutes,
         "provider": args.provider, "model": args.model, "model_url": args.model_url,
         "script": str(Path(args.script).resolve()) if args.script else None,
+        "script_delay": args.script_delay,
         "allow": sorted(set(DEFAULTS["allow"]) | set(args.allow or [])),
     }
     if args.provider != "scripted" and not args.no_model_check:
@@ -188,7 +189,8 @@ def cmd_tasks(args: argparse.Namespace) -> int:
 def cmd_bench(args: argparse.Namespace) -> int:
     spec = {"provider": args.provider, "model": args.model, "model_url": args.model_url,
             "max_iters": args.max_iters, "priority": args.priority,
-            "script": str(Path(args.script).resolve()) if args.script else None}
+            "script": str(Path(args.script).resolve()) if args.script else None,
+            "script_delay": args.script_delay}
     if args.provider != "scripted":
         problem = check_model(args.provider, args.model_url, args.model)
         if problem:
@@ -229,6 +231,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--model-url", default=os.environ.get("LOOPOS_MODEL_URL"),
                      help="model server URL (default: localhost:11434 for ollama, localhost:8080/v1 for openai)")
     run.add_argument("--script", help="JSON list of replies for --provider scripted")
+    run.add_argument("--script-delay", type=float, help="seconds each scripted reply takes (simulated thinking)")
     run.add_argument("--allow", action="append", metavar="PROGRAM", help="extra program the loop may run")
     run.add_argument("--no-model-check", action="store_true", help="start even if the model is unreachable now")
     run.add_argument("-f", "--follow", action="store_true", help="stream events until the loop finishes")
@@ -277,6 +280,7 @@ def build_parser() -> argparse.ArgumentParser:
     bench.add_argument("--model", default=os.environ.get("LOOPOS_MODEL", DEFAULTS["model"]))
     bench.add_argument("--model-url", default=os.environ.get("LOOPOS_MODEL_URL"))
     bench.add_argument("--script", help="JSON replies for --provider scripted")
+    bench.add_argument("--script-delay", type=float, help="seconds each scripted reply takes")
     bench.set_defaults(func=cmd_bench)
 
     export = commands.add_parser("export", help="write a fine-tuning dataset from loop traces")
