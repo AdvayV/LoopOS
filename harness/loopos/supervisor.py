@@ -359,9 +359,8 @@ class Supervisor:
         with self.cond:
             item = self._get(loop)
             if item.status == "running":
-                self._pause_now(item, f"Model unavailable: {error}")
-                item.note = f"model unavailable; fix it, then: loopos resume {loop}"
-                self._persist(item)
+                self._pause_now(item, f"Model unavailable: {error}",
+                                note=f"model unavailable; fix it, then: loopos resume {loop}")
         return {}
 
     def op_syscall(self, loop: str, action: dict[str, Any]) -> dict[str, Any]:
@@ -492,23 +491,26 @@ class Supervisor:
         if restore and item.best_score > item.score and self._checkpoint_dir(item).is_dir():
             self._restore_best(item)
             reason += f" Workspace restored to the best checkpoint (iteration {item.best_iteration}, score {item.best_score:.2f})."
-        item.status = status
+        # Readers poll the status without the lock: record why (note, final event) before the status
+        # flips, so whoever sees the final status also sees the reason and the final event.
         item.note = reason
         item.waiting_model = item.holding_model = item.pause_requested = False
         self.scheduler.forget(item.id)
         self._event(item, status, reason, {**(data or {}), "iterations": item.iteration})
+        item.status = status
         self._persist(item)
         self._dispatch()
 
-    def _pause_now(self, item: Loop, reason: str) -> None:
+    def _pause_now(self, item: Loop, reason: str, note: str | None = None) -> None:
+        # The note is set before the status so a reader that sees "paused" also sees why.
         item.pause_requested = False
-        item.status = "paused"
-        item.note = reason
+        item.note = note or reason
         if item.process and item.process.poll() is None:
             self._signal(item, signal.SIGSTOP)
         item.jobs.paused = True
         item.jobs.signal(signal.SIGSTOP)
         self._event(item, "pause", reason)
+        item.status = "paused"
         self._persist(item)
         self._dispatch()
 
