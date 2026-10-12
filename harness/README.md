@@ -19,7 +19,7 @@ python -m venv .venv && .venv/bin/pip install -e '.[test]'
 .venv/bin/loopos --help        # or: python -m loopos --help
 ```
 
-The worker model is served by [Ollama](https://ollama.com) (`--provider ollama`, default `http://localhost:11434`): locally (`ollama pull qwen2.5-coder:7b`), or on the GPU VM through `loopos-vm tunnel` (see `../infra/aws`). Any OpenAI-compatible server also works with `--provider openai --model-url http://host:port/v1`: llama.cpp's `llama-server`, vLLM or LM Studio. A key, if needed, is read from `$LOOPOS_API_KEY`.
+The worker model is served by [Ollama](https://ollama.com) (`--provider ollama`, default `http://localhost:11434`): locally (`ollama pull qwen2.5-coder:7b`), or on the CPU VM through `loopos-vm tunnel` (see `../infra/aws`). Any OpenAI-compatible server also works with `--provider openai --model-url http://host:port/v1`: llama.cpp's `llama-server`, vLLM or LM Studio. A key, if needed, is read from `$LOOPOS_API_KEY`.
 
 ## How it works
 
@@ -89,4 +89,4 @@ Integration tests start a real supervisor and worker processes and cover: reachi
 ## Limits
 
 - Landlock confines writes, not reads, and an allowed interpreter such as `python` can still read any file the user can. Run loops on the VM or in a container for untrusted goals.
-- One model turn at a time (`slots=1`); a larger GPU could serve several.
+- One model turn at a time (`slots=1`); a larger VM could serve several.

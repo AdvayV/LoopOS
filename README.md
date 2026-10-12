@@ -2,7 +2,7 @@
 
 ## New: Loop harness (CLI)
 
-`harness/` runs real agent loops as supervised Linux processes: start a loop with a goal and a done check, and the supervisor schedules the model, performs each requested action as a checked syscall, sandboxes commands with rlimits and Landlock, restarts crashed or hung workers, and recovers from livelock until the check passes. See [the harness guide](harness/README.md). `infra/aws/` holds the throwaway GPU VM that serves the model.
+`harness/` runs real agent loops as supervised Linux processes: start a loop with a goal and a done check, and the supervisor schedules the model, performs each requested action as a checked syscall, sandboxes commands with rlimits and Landlock, restarts crashed or hung workers, and recovers from livelock until the check passes. See [the harness guide](harness/README.md). `infra/aws/` holds the throwaway CPU VM that serves the model.
 
 ## Crisis Lab
 

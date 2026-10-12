@@ -11,7 +11,7 @@ from typing import Any, Protocol
 from .syscalls import ACTION_SCHEMA
 
 DEFAULT_URLS = {"ollama": "http://localhost:11434", "openai": "http://localhost:8080/v1"}
-SERVE_HINT = "or open the GPU VM with `loopos-vm up` then `loopos-vm tunnel`"
+SERVE_HINT = "or open the VM with `loopos-vm up` then `loopos-vm tunnel`"
 
 
 class ProviderError(Exception):
@@ -41,7 +41,7 @@ def _http_json(url: str, body: dict[str, Any] | None = None, timeout: float = 60
 
 
 class OllamaProvider:
-    """A model served by Ollama, locally or through an SSH tunnel to the GPU VM."""
+    """A model served by Ollama, locally or through an SSH tunnel to the VM."""
 
     name = "ollama"
 
