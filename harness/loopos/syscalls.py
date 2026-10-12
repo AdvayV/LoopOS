@@ -8,8 +8,11 @@ from __future__ import annotations
 
 import os
 import shlex
+import signal
 import subprocess
 import tempfile
+import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -121,9 +124,50 @@ def resolve_path(policy: Policy, relative: str, *, for_write: bool = False) -> P
     return candidate
 
 
+class Jobs:
+    """Commands currently running for one loop, so the supervisor can signal them with its worker.
+
+    While `paused` is set, a command's timeout does not advance.
+    """
+
+    def __init__(self) -> None:
+        self._processes: set[subprocess.Popen] = set()
+        self._lock = threading.Lock()
+        self.paused = False
+
+    def add(self, process: subprocess.Popen) -> None:
+        with self._lock:
+            self._processes.add(process)
+
+    def discard(self, process: subprocess.Popen) -> None:
+        with self._lock:
+            self._processes.discard(process)
+
+    def signal(self, sig: int) -> None:
+        with self._lock:
+            processes = list(self._processes)
+        for process in processes:
+            _signal_group(process, sig)
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._processes)
+
+
+def _signal_group(process: subprocess.Popen, sig: int) -> None:
+    try:
+        os.killpg(process.pid, sig)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
 def run_command(argv: list[str], policy: Policy, *, timeout: int | None = None,
-                enforce_allowlist: bool = True) -> tuple[int, str]:
-    """Run argv in the workspace through the sandbox launcher. Returns (exit code, output tail)."""
+                enforce_allowlist: bool = True, jobs: Jobs | None = None) -> tuple[int, str]:
+    """Run argv in the workspace through the sandbox launcher. Returns (exit code, output tail).
+
+    The command gets its own process group; when it finishes or times out, the whole group is
+    killed, so background children cannot outlive it.
+    """
     if not argv:
         raise SyscallError("empty command")
     program = os.path.basename(argv[0])
@@ -134,14 +178,45 @@ def run_command(argv: list[str], policy: Policy, *, timeout: int | None = None,
                               niceness=policy.niceness, writable=writable)
     env = {key: os.environ[key] for key in ("PATH", "HOME", "LANG", "TERM", "VIRTUAL_ENV") if key in os.environ}
     env["PYTHONDONTWRITEBYTECODE"] = "1"
+    limit = float(timeout or policy.command_timeout)
+    process = subprocess.Popen(wrapped, cwd=policy.workspace, env=env, stdin=subprocess.DEVNULL,
+                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
+    if jobs is not None:
+        jobs.add(process)
+    # Read output on a thread and wait for the command itself: a background child holding the pipe
+    # open must not keep the syscall waiting.
+    chunks: list[bytes] = []
+    reader = threading.Thread(target=lambda: chunks.extend(iter(lambda: process.stdout.read1(65536), b"")),
+                              daemon=True)
+    reader.start()
+    timed_out = False
     try:
-        process = subprocess.run(wrapped, cwd=policy.workspace, env=env, stdin=subprocess.DEVNULL,
-                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                 timeout=timeout or policy.command_timeout, start_new_session=True)
-    except subprocess.TimeoutExpired as exc:
-        output = (exc.output or b"").decode(errors="replace")
-        return 124, truncate(output + f"\n[killed after {exc.timeout}s timeout]", policy.output_limit)
-    return process.returncode, truncate(process.stdout.decode(errors="replace"), policy.output_limit)
+        remaining, last = limit, time.monotonic()
+        while True:
+            try:
+                process.wait(timeout=0.25)
+                break
+            except subprocess.TimeoutExpired:
+                now = time.monotonic()
+                if not (jobs is not None and jobs.paused):
+                    remaining -= now - last
+                last = now
+                if remaining <= 0:
+                    timed_out = True
+                    _signal_group(process, signal.SIGKILL)
+                    process.wait()
+                    break
+    finally:
+        _signal_group(process, signal.SIGKILL)
+        if jobs is not None:
+            jobs.discard(process)
+    reader.join(timeout=5)
+    if not reader.is_alive():
+        process.stdout.close()
+    text = b"".join(chunks).decode(errors="replace")
+    if timed_out:
+        return 124, truncate(text + f"\n[killed after {limit:g}s timeout]", policy.output_limit)
+    return process.returncode, truncate(text, policy.output_limit)
 
 
 def _list_dir(policy: Policy, path: Path) -> str:
@@ -157,7 +232,7 @@ def _list_dir(policy: Policy, path: Path) -> str:
     return "\n".join(shown) + suffix if shown else "(empty directory)"
 
 
-def execute(request: Any, policy: Policy) -> dict[str, Any]:
+def execute(request: Any, policy: Policy, jobs: Jobs | None = None) -> dict[str, Any]:
     """Perform one validated action. Never raises for a bad request: refusals become results."""
     try:
         action = validate(request)
@@ -169,7 +244,7 @@ def execute(request: Any, policy: Policy) -> dict[str, Any]:
                 argv = shlex.split(action["command"])
             except ValueError as exc:
                 raise SyscallError(f"could not parse command: {exc}") from exc
-            code, output = run_command(argv, policy)
+            code, output = run_command(argv, policy, jobs=jobs)
             return {"ok": code == 0, "exit_code": code, "output": output or "(no output)"}
         path = resolve_path(policy, action["path"], for_write=name in {"write_file", "edit_file"})
         if name == "list_dir":

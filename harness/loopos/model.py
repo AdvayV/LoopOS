@@ -51,6 +51,21 @@ class OllamaProvider:
             raise ProviderError(f"unexpected Ollama response: {str(reply)[:200]}") from exc
 
 
+def check_ollama(url: str, model: str, timeout: float = 5) -> str:
+    """Return "" if Ollama at `url` serves `model`, else a message saying how to fix it."""
+    try:
+        with urllib.request.urlopen(f"{url.rstrip('/')}/api/tags", timeout=timeout) as response:
+            names = {m.get("name", "") for m in json.load(response).get("models", [])}
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+        return (f"cannot reach Ollama at {url} ({getattr(exc, 'reason', exc)}). Start it with `ollama serve`, "
+                "or open the GPU VM with `loopos-vm up` then `loopos-vm tunnel`")
+    wanted = model if ":" in model else f"{model}:latest"
+    if wanted not in names:
+        available = ", ".join(sorted(names)) or "none"
+        return f"model {model!r} is not on {url} (available: {available}). Pull it with `ollama pull {model}`"
+    return ""
+
+
 class ScriptedProvider:
     """Replays replies from a JSON list: for tests and demos without a model.
 

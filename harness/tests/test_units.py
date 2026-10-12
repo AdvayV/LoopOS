@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
 
 from loopos import checkpoint, monitor, sandbox
 from loopos.scheduler import ModelScheduler
-from loopos.syscalls import Policy, SyscallError, execute, run_command, validate
+from loopos.syscalls import Jobs, Policy, SyscallError, execute, run_command, validate
 from loopos.worker import parse_action
 
 
@@ -162,3 +163,24 @@ def test_parse_action_accepts_wrapped_json(reply):
 def test_parse_action_reports_bad_replies():
     assert parse_action("no json here")[1]
     assert parse_action("[1, 2]")[1]
+
+
+def test_command_group_is_cleaned_up(policy):
+    code, output = run_command(["sh", "-c", "sleep 30 & echo $!"], policy, enforce_allowlist=False)
+    pid = int(output.split()[-1])
+    time.sleep(0.2)
+    assert code == 0
+    assert not Path(f"/proc/{pid}").exists() or Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] == "Z"
+
+
+def test_paused_jobs_do_not_time_out(policy):
+    jobs = Jobs()
+    jobs.paused = True
+    started = time.monotonic()
+    code, _ = run_command([sys.executable, "-c", "import time; time.sleep(1.5)"], policy, timeout=1, jobs=jobs)
+    assert code == 0 and time.monotonic() - started >= 1.5 and len(jobs) == 0
+
+
+def test_check_ollama_explains_problems():
+    from loopos.model import check_ollama
+    assert "cannot reach Ollama" in check_ollama("http://127.0.0.1:9", "m", timeout=1)

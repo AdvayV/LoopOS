@@ -64,6 +64,7 @@ class Loop:
     hint: str = ""
     check: dict[str, Any] = field(default_factory=dict)
     history: list[dict[str, str]] = field(default_factory=list)
+    jobs: syscalls.Jobs = field(default_factory=syscalls.Jobs, repr=False)  # commands run on its behalf
 
     PERSISTED = ("iteration", "score", "best_score", "best_iteration", "best_check", "since_best", "restarts",
                  "recoveries", "active_seconds", "note", "hint", "check")
@@ -135,6 +136,7 @@ class Supervisor:
     def _shutdown(self) -> None:
         with self.cond:
             for loop in self.loops.values():
+                loop.jobs.signal(signal.SIGKILL)
                 if loop.process and loop.process.poll() is None:
                     self._signal(loop, signal.SIGKILL)
                     loop.process.wait(timeout=5)
@@ -278,6 +280,8 @@ class Supervisor:
             item.status = "running"
             item.note = ""
             item.last_activity = time.monotonic()
+            item.jobs.paused = False
+            item.jobs.signal(signal.SIGCONT)
             if item.process is None or item.process.poll() is not None:
                 self._spawn(item)
             else:
@@ -292,8 +296,7 @@ class Supervisor:
             if item.status in TERMINAL:
                 raise LoopOSError(f"loop {loop} already finished ({item.status})")
             self._terminate(item, "stopped", "Stopped by operator.", restore=False)
-            if item.process and item.process.poll() is None:
-                self._signal(item, signal.SIGKILL)
+            self._kill_all(item)
         return {}
 
     def op_shutdown(self) -> dict[str, Any]:
@@ -362,7 +365,7 @@ class Supervisor:
         if item.status in TERMINAL:
             return {"result": {"ok": False, "refused": True, "output": f"Refused: loop is {item.status}"}}
         item.last_activity = time.monotonic()
-        result = syscalls.execute(action, syscalls.Policy.from_spec(item.spec))
+        result = syscalls.execute(action, syscalls.Policy.from_spec(item.spec), item.jobs)
         item.last_activity = time.monotonic()
         outcome = "refused" if result.get("refused") else ("ok" if result["ok"] else "failed")
         self._event(item, "syscall", f"{syscalls.fingerprint_text(action)} -> {outcome}",
@@ -458,7 +461,8 @@ class Supervisor:
     def _run_check(self, item: Loop) -> dict[str, Any]:
         policy = syscalls.Policy.from_spec(item.spec)
         code, output = syscalls.run_command(shlex.split(item.spec["until"]), policy,
-                                            timeout=int(item.spec["check_timeout"]), enforce_allowlist=False)
+                                            timeout=int(item.spec["check_timeout"]), enforce_allowlist=False,
+                                            jobs=item.jobs)
         return {"exit_code": code, "output": output}
 
     def _restore_best(self, item: Loop) -> None:
@@ -485,6 +489,8 @@ class Supervisor:
         item.note = reason
         if item.process and item.process.poll() is None:
             self._signal(item, signal.SIGSTOP)
+        item.jobs.paused = True
+        item.jobs.signal(signal.SIGSTOP)
         self._event(item, "pause", reason)
         self._persist(item)
         self._dispatch()
@@ -507,6 +513,13 @@ class Supervisor:
         except (ProcessLookupError, AttributeError):
             pass
 
+    def _kill_all(self, item: Loop) -> None:
+        """SIGKILL the worker and every command running for it (each in its own process group)."""
+        if item.process and item.process.poll() is None:
+            self._signal(item, signal.SIGKILL)
+        item.jobs.paused = False
+        item.jobs.signal(signal.SIGKILL)
+
     def _spawn(self, item: Loop) -> None:
         directory = paths.loop_dir(self.root, item.id)
         argv = sandbox.command([sys.executable, "-m", "loopos.worker", "--loop", item.id, "--home", str(self.root)],
@@ -523,6 +536,7 @@ class Supervisor:
         self._persist(item)
 
     def _crashed(self, item: Loop, reason: str) -> None:
+        item.jobs.signal(signal.SIGKILL)  # the dead worker's in-flight command must not race the new one
         self.scheduler.forget(item.id)
         item.waiting_model = item.holding_model = False
         item.process = None
@@ -550,13 +564,13 @@ class Supervisor:
                     code = item.process.poll()
                     if code is not None:
                         self._crashed(item, f"Worker exited unexpectedly (code {code})")
-                    elif not item.waiting_model and now - item.last_activity > self.hang_timeout:
+                    elif not item.waiting_model and not item.jobs and now - item.last_activity > self.hang_timeout:
                         self._signal(item, signal.SIGKILL)
                         item.process.wait(timeout=5)
                         self._crashed(item, f"Worker hung (no progress for {int(now - item.last_activity)}s)")
                     elif item.active_seconds > float(item.spec["max_minutes"]) * 60 + 60:
                         # The iteration boundary normally enforces this; this catches loops that never get there.
-                        self._signal(item, signal.SIGKILL)
+                        self._kill_all(item)
                         self._terminate(item, "budget", f"Time budget ({item.spec['max_minutes']} min) exceeded.")
             last = now
 

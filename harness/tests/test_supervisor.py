@@ -157,3 +157,24 @@ def test_dataset_export_keeps_useful_steps(harness, workspace, tmp_path):
     rows = [json.loads(line) for line in out.read_text().splitlines()]
     assert counts["read"] == 3 and counts["written"] == 2  # the failed read of a missing file is dropped
     assert rows[-1]["meta"]["event"] == "done" and rows[-1]["messages"][-1]["role"] == "assistant"
+
+
+LONG = {"action": "run", "command": "python -c 'import time; time.sleep(30)'", "reason": "long step"}
+
+
+def test_pause_and_kill_reach_running_commands(harness, workspace):
+    loop_id = harness.run(workspace, [LONG])
+    loop = harness.supervisor.loops[loop_id]
+    deadline = time.monotonic() + 10
+    while not len(loop.jobs) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    command_pid = next(iter(loop.jobs._processes)).pid
+    harness.request("pause", loop=loop_id)
+    time.sleep(0.3)
+    assert process_state(command_pid) == "T"
+    harness.request("resume", loop=loop_id)
+    time.sleep(0.3)
+    assert process_state(command_pid) in {"S", "R"}
+    harness.request("kill", loop=loop_id)
+    time.sleep(0.5)
+    assert not os.path.exists(f"/proc/{command_pid}") or process_state(command_pid) == "Z"

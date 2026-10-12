@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from . import dataset, paths
+from .model import check_ollama
 from .protocol import Connection, LoopOSError
 from .supervisor import DEFAULTS, PACKAGE_ROOT, TERMINAL
 
@@ -112,6 +113,10 @@ def cmd_run(args: argparse.Namespace) -> int:
         "script": str(Path(args.script).resolve()) if args.script else None,
         "allow": sorted(set(DEFAULTS["allow"]) | set(args.allow or [])),
     }
+    if args.provider == "ollama" and not args.no_model_check:
+        problem = check_ollama(args.ollama_url, args.model)
+        if problem:
+            raise LoopOSError(problem)
     start_daemon(args.root)
     loop_id = request(args.root, "run", spec=spec)["id"]
     print(f"Started loop {loop_id}. Watch: loopos logs {loop_id} -f   Status: loopos ps")
@@ -226,6 +231,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--ollama-url", default=os.environ.get("OLLAMA_HOST_URL", DEFAULTS["ollama_url"]))
     run.add_argument("--script", help="JSON list of replies for --provider scripted")
     run.add_argument("--allow", action="append", metavar="PROGRAM", help="extra program the loop may run")
+    run.add_argument("--no-model-check", action="store_true", help="start even if the model is unreachable now")
     run.add_argument("-f", "--follow", action="store_true", help="stream events until the loop finishes")
     run.set_defaults(func=cmd_run)
 
