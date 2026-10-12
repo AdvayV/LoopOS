@@ -67,6 +67,7 @@ class Policy:
     write_limit: int = 200_000
     output_limit: int = 4_000
     confine_writes: bool = True
+    network: bool = False  # TCP connect/listen for commands and the done check
 
     @classmethod
     def from_spec(cls, spec: dict[str, Any]) -> "Policy":
@@ -75,6 +76,7 @@ class Policy:
             allow=frozenset(spec.get("allow") or DEFAULT_ALLOW),
             command_timeout=spec.get("command_timeout", 120),
             memory_mb=spec.get("memory_mb", 2048),
+            network=bool(spec.get("network", False)),
             # Higher-priority loops keep a lower niceness for their commands.
             niceness=max(0, 10 - int(spec.get("priority", 5))),
         )
@@ -176,7 +178,7 @@ def run_command(argv: list[str], policy: Policy, *, timeout: int | None = None,
         raise SyscallError(f"command {program!r} is not allowed; allowed: {', '.join(sorted(policy.allow))}")
     writable = [str(policy.workspace), tempfile.gettempdir(), "/dev"] if policy.confine_writes else []
     wrapped = sandbox.command(argv, cpu_seconds=policy.cpu_seconds, memory_mb=policy.memory_mb,
-                              niceness=policy.niceness, writable=writable)
+                              niceness=policy.niceness, writable=writable, network=policy.network)
     env = {key: os.environ[key] for key in ("PATH", "HOME", "LANG", "TERM") if key in os.environ}
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     # `python`/`pytest` resolve to the project's .venv if it has one, else to LoopOS's own interpreter.

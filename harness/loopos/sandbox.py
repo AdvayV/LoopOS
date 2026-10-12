@@ -1,12 +1,13 @@
 """Process launcher that confines itself, then execs the real command.
 
-    python -m loopos.sandbox --cpu 120 --mem 2048 --nice 5 --write /work --write /tmp -- pytest -q
+    python -m loopos.sandbox --cpu 120 --mem 2048 --nice 5 --write /work --write /tmp --no-net -- pytest -q
 
 Limits are applied in this fresh process instead of a fork-time preexec_fn, which is unsafe
 in the multi-threaded supervisor:
   * RLIMIT_CPU / RLIMIT_AS cap CPU seconds and address space,
   * nice() lowers scheduling priority for low-priority loops,
-  * Landlock (Linux >= 5.13) denies file writes outside the --write directories.
+  * Landlock (Linux >= 5.13) denies file writes outside the --write directories, and with
+    --no-net (Linux >= 6.7) denies TCP connections and listening sockets as well.
 """
 from __future__ import annotations
 
@@ -30,6 +31,8 @@ _REMOVE_DIR, _REMOVE_FILE = 1 << 4, 1 << 5
 _MAKE_ANY = sum(1 << bit for bit in range(6, 13))  # char, dir, reg, sock, fifo, block, sym
 _REFER = 1 << 13     # ABI 2
 _TRUNCATE = 1 << 14  # ABI 3
+# Landlock network rights (ABI 4). Handling them with no rules denies them outright.
+_NET_BIND_TCP, _NET_CONNECT_TCP = 1 << 0, 1 << 1
 
 
 def _libc() -> ctypes.CDLL:
@@ -44,21 +47,25 @@ def landlock_abi() -> int:
     return max(int(version), 0)
 
 
-def restrict_writes(writable: list[str]) -> bool:
-    """Deny filesystem modifications outside `writable` for this process and its children."""
+def confine(writable: list[str], allow_network: bool = True) -> dict[str, bool]:
+    """Deny filesystem modifications outside `writable` (and, if asked, all TCP networking) for
+    this process and its children. Returns which confinements the kernel could apply."""
     abi = landlock_abi()
+    applied = {"writes": False, "network": False}
     if abi < 1:
-        return False
+        return applied
     handled = _WRITE_FILE | _REMOVE_DIR | _REMOVE_FILE | _MAKE_ANY
     if abi >= 2:
         handled |= _REFER
     if abi >= 3:
         handled |= _TRUNCATE
+    net = 0 if allow_network or abi < 4 else _NET_BIND_TCP | _NET_CONNECT_TCP
     libc = _libc()
-    attr = ctypes.c_uint64(handled)  # struct landlock_ruleset_attr { __u64 handled_access_fs; ... }
-    ruleset = libc.syscall(_SYS_CREATE_RULESET, ctypes.byref(attr), ctypes.c_size_t(8), 0)
+    # struct landlock_ruleset_attr { __u64 handled_access_fs; __u64 handled_access_net; ... }
+    attr = ctypes.create_string_buffer(struct.pack("=QQ", handled, net), 16)
+    ruleset = libc.syscall(_SYS_CREATE_RULESET, attr, ctypes.c_size_t(16 if abi >= 4 else 8), 0)
     if ruleset < 0:
-        return False
+        return applied
     try:
         for path in writable:
             try:
@@ -78,7 +85,9 @@ def restrict_writes(writable: list[str]) -> bool:
             raise OSError(ctypes.get_errno(), "landlock_restrict_self failed")
     finally:
         os.close(ruleset)
-    return True
+    applied["writes"] = True
+    applied["network"] = bool(net)
+    return applied
 
 
 def apply_limits(cpu_seconds: int | None, memory_mb: int | None, niceness: int) -> None:
@@ -92,7 +101,7 @@ def apply_limits(cpu_seconds: int | None, memory_mb: int | None, niceness: int) 
 
 
 def command(argv: list[str], *, cpu_seconds: int | None = None, memory_mb: int | None = None,
-            niceness: int = 0, writable: list[str] | None = None) -> list[str]:
+            niceness: int = 0, writable: list[str] | None = None, network: bool = True) -> list[str]:
     """Wrap argv so it runs through this launcher with the given limits."""
     # Run this file directly in isolated mode: works without installing the package and ignores
     # modules in the (untrusted) working directory.
@@ -103,6 +112,8 @@ def command(argv: list[str], *, cpu_seconds: int | None = None, memory_mb: int |
         wrapped += ["--mem", str(memory_mb)]
     for path in writable or []:
         wrapped += ["--write", path]
+    if not network:
+        wrapped.append("--no-net")
     return wrapped + ["--", *argv]
 
 
@@ -112,14 +123,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--mem", type=int)
     parser.add_argument("--nice", type=int, default=0)
     parser.add_argument("--write", action="append", default=[])
+    parser.add_argument("--no-net", action="store_true", help="deny TCP connections and listening")
     parser.add_argument("argv", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     target = args.argv[1:] if args.argv[:1] == ["--"] else args.argv
     if not target:
         parser.error("missing command")
     apply_limits(args.cpu, args.mem, args.nice)
-    if args.write and not restrict_writes(args.write):
-        print("loopos.sandbox: Landlock unavailable; file writes are not confined", file=sys.stderr)
+    if args.write or args.no_net:
+        applied = confine(args.write, allow_network=not args.no_net)
+        if args.write and not applied["writes"]:
+            print("loopos.sandbox: Landlock unavailable; file writes are not confined", file=sys.stderr)
+        if args.no_net and not applied["network"]:
+            print("loopos.sandbox: Landlock network rules unavailable (Linux < 6.7); network not confined",
+                  file=sys.stderr)
     try:
         os.execvp(target[0], target)
     except FileNotFoundError:

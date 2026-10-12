@@ -36,7 +36,7 @@ TERMINAL = {"done", "stopped", "gave_up", "budget", "failed"}
 DEFAULTS: dict[str, Any] = {
     "priority": 5, "max_iters": 30, "max_minutes": 60, "provider": "ollama", "model": "qwen2.5-coder:3b",
     "model_url": None, "allow": list(syscalls.DEFAULT_ALLOW), "command_timeout": 120,
-    "check_timeout": 300, "memory_mb": 2048, "model_timeout": 600,
+    "check_timeout": 300, "memory_mb": 2048, "model_timeout": 600, "network": False,
 }
 PACKAGE_ROOT = str(Path(__file__).resolve().parent.parent)
 

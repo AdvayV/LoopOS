@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -29,11 +30,20 @@ def keep(record: dict[str, Any], loop_status: str, mode: str) -> bool:
     return loop_status == "done" and record["event"] not in {"livelock", "stalled"}
 
 
-def export(root: Path, out: Path, mode: str = "success") -> dict[str, int]:
+def is_validation(loop_id: str, fraction: float) -> bool:
+    """Deterministic split by loop, so one loop's iterations never straddle train and validation."""
+    bucket = int(hashlib.sha256(loop_id.encode()).hexdigest()[:8], 16) / 0xFFFFFFFF
+    return bucket < fraction
+
+
+def export(root: Path, out: Path, mode: str = "success", val_fraction: float = 0.0) -> dict[str, int]:
+    """Write training examples to `out`; with `val_fraction`, a held-aside share of loops goes to
+    `<out stem>.val.jsonl` instead."""
     statuses = {loop["id"]: loop["status"] for loop in Store(paths.database(root)).loops()}
     seen: set[str] = set()
-    counts = {"read": 0, "written": 0, "duplicates": 0}
-    with open(out, "w") as sink:
+    counts = {"read": 0, "written": 0, "validation": 0, "duplicates": 0}
+    val_path = out.with_name(out.stem + ".val" + out.suffix)
+    with open(out, "w") as train, open(val_path, "w") if val_fraction else open(os.devnull, "w") as val:
         for record in _traces(root):
             counts["read"] += 1
             if not keep(record, statuses.get(record["loop"], "unknown"), mode):
@@ -43,10 +53,15 @@ def export(root: Path, out: Path, mode: str = "success") -> dict[str, int]:
                 counts["duplicates"] += 1
                 continue
             seen.add(digest)
-            sink.write(json.dumps({
+            line = json.dumps({
                 "messages": record["messages"],
                 "meta": {key: record[key] for key in ("loop", "iteration", "model", "score_before", "score_after", "event")}
                         | {"loop_status": statuses.get(record["loop"], "unknown")},
-            }) + "\n")
-            counts["written"] += 1
+            }) + "\n"
+            if val_fraction and is_validation(record["loop"], val_fraction):
+                val.write(line)
+                counts["validation"] += 1
+            else:
+                train.write(line)
+                counts["written"] += 1
     return counts

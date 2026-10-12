@@ -233,3 +233,22 @@ def test_http_providers_send_the_schema_and_parse_replies():
         assert "isn't on the server" in check_model("openai", base + "/v1", "other")
     finally:
         server.shutdown()
+
+
+@pytest.mark.skipif(sandbox.landlock_abi() < 4, reason="Landlock network rules need Linux 6.7+")
+def test_commands_have_no_network_unless_allowed(policy):
+    import socket
+
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen()
+    port = server.getsockname()[1]
+    script = f"import socket; socket.create_connection(('127.0.0.1', {port}), timeout=2); print('connected')"
+    try:
+        code, output = run_command([sys.executable, "-c", script], policy)
+        assert code != 0 and "Permission denied" in output
+        policy.network = True
+        code, output = run_command([sys.executable, "-c", script], policy)
+        assert code == 0 and "connected" in output
+    finally:
+        server.close()

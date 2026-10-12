@@ -6,6 +6,7 @@ directly (`loopos run ...`, `loopos ps`, ...).
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shlex
 import sys
@@ -134,6 +135,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         "max_iters": config.resolve(args.root, "iters", args.iters)[0],
         "max_minutes": args.minutes or DEFAULTS["max_minutes"],
         "allow": sorted(set(DEFAULTS["allow"]) | set(args.allow or [])),
+        "network": bool(args.net),
         **model_spec(args),
     }
     require_model(spec, args.no_check)
@@ -256,23 +258,32 @@ def cmd_config(args: argparse.Namespace) -> int:
 
 def cmd_export(args: argparse.Namespace) -> int:
     out = Path(args.out)
-    counts = dataset.export(args.root, out, "all" if args.all else "success")
+    counts = dataset.export(args.root, out, "all" if args.all else "success", args.val)
     say(f"  {style.green('✓')} {counts['written']} training examples → {ui.short_path(str(out.resolve()))}"
+        + (f"  +{counts['validation']} validation → {out.stem}.val{out.suffix}" if args.val else "")
         + style.dim(f"   (from {counts['read']} iterations, {counts['duplicates']} duplicates skipped)"))
     return 0
 
 
 def cmd_tasks(args: argparse.Namespace) -> int:
-    source = Path(args.source).resolve()
-    out = Path(args.out or f"{source.name}-tasks")
-    try:
-        manifest = tasks.make(source, out, args.count, args.until, args.seed)
-    except ValueError as exc:
-        raise LoopOSError(str(exc)) from exc
-    for task in manifest:
-        say(f"  {style.accent('•')} {task['name']}  " + style.dim(task["bug"]))
-    say(f"\n  {style.green('✓')} {len(manifest)} tasks → {ui.short_path(str(out.resolve()))}"
-        + style.dim(f"   next: loopos bench {args.out or out.name}"))
+    if args.out and len(args.sources) > 1:
+        raise LoopOSError("-o works with a single project; several projects get <name>-tasks each")
+    made = []
+    for source in args.sources:
+        source = Path(source).resolve()
+        out = Path(args.out or f"{source.name}-tasks")
+        holdout_out = out.with_name(out.name.removesuffix("-tasks") + "-holdout")
+        try:
+            manifest = tasks.make(source, out, args.count, args.until, args.seed, args.holdout, holdout_out)
+        except ValueError as exc:
+            raise LoopOSError(str(exc)) from exc
+        for task in manifest:
+            say(f"  {style.accent('•')} {out.name}/{task['name']}  " + style.dim(task["bug"]))
+        held = len(json.loads((holdout_out / "tasks.json").read_text())) if args.holdout else 0
+        say(f"  {style.green('✓')} {len(manifest)} tasks → {ui.short_path(str(out.resolve()))}"
+            + (style.dim(f"   + {held} held out → {holdout_out.name}") if args.holdout else "") + "\n")
+        made.append(out.name)
+    say(style.dim(f"  next: loopos bench {' '.join(made)}"))
     return 0
 
 
@@ -299,7 +310,8 @@ def cmd_bench(args: argparse.Namespace) -> int:
 
     model = "scripted replies" if spec["provider"] == "scripted" else spec["model"]
     say(style.dim(f"  {model}  ·  {args.parallel} at a time\n"))
-    summary = tasks.bench(args.root, Path(args.tasks), parallel=args.parallel, spec=spec, poll=0.25, progress=progress)
+    summary = tasks.bench(args.root, [Path(d) for d in args.tasks], parallel=args.parallel, spec=spec, poll=0.25,
+                          progress=progress)
     line.clear()
     mean = summary["mean_iterations_when_solved"]
     say(f"\n  {style.accent('◆', bold=True)} solved {summary['solved']}/{summary['tasks']} "
@@ -346,6 +358,7 @@ def build_parser(parser_class: type[argparse.ArgumentParser] = argparse.Argument
     run.add_argument("-n", "--iters", "--max-iters", dest="iters", type=int, help="iteration budget (default 30)")
     run.add_argument("--minutes", "--max-minutes", dest="minutes", type=float, help="time budget (default 60)")
     run.add_argument("--allow", action="append", metavar="PROGRAM", help="extra program the loop may run")
+    run.add_argument("--net", action="store_true", help="let commands use the network (off by default)")
     run.add_argument("--no-check", "--no-model-check", dest="no_check", action="store_true",
                      help="start even if the model is unreachable now")
     run.add_argument("-d", "--detach", action="store_true", help="start and return immediately")
@@ -387,16 +400,18 @@ def build_parser(parser_class: type[argparse.ArgumentParser] = argparse.Argument
     settings.add_argument("value", nargs="?")
     settings.set_defaults(func=cmd_config)
 
-    task_cmd = commands.add_parser("tasks", help="plant bugs in a passing project: tasks DIR")
-    task_cmd.add_argument("source", metavar="DIR", help="project whose tests pass")
+    task_cmd = commands.add_parser("tasks", help="plant bugs in passing projects: tasks DIR [DIR...]")
+    task_cmd.add_argument("sources", nargs="+", metavar="DIR", help="project(s) whose tests pass")
     task_cmd.add_argument("-o", "--out", help="output folder (default: DIR-tasks)")
     task_cmd.add_argument("-n", "--count", type=int, default=10)
+    task_cmd.add_argument("--holdout", type=int, default=0, metavar="N",
+                          help="also write N tasks with different bugs to DIR-holdout, for testing a trained model")
     task_cmd.add_argument("-u", "--until", default=tasks.DEFAULT_CHECK, help="check that must pass before mutation")
     task_cmd.add_argument("--seed", type=int, default=0)
     task_cmd.set_defaults(func=cmd_tasks)
 
-    bench = commands.add_parser("bench", help="score the model on practice tasks: bench DIR")
-    bench.add_argument("tasks", metavar="DIR", help="folder made by `loopos tasks`")
+    bench = commands.add_parser("bench", help="score the model on practice tasks: bench DIR [DIR...]")
+    bench.add_argument("tasks", nargs="+", metavar="DIR", help="folder(s) made by `loopos tasks`")
     bench.add_argument("-j", "--parallel", type=int, default=2, help="loops at once (default 2)")
     bench.add_argument("-n", "--iters", type=int, default=20, help="iteration budget per task (default 20)")
     add_model_flags(bench)
@@ -405,6 +420,8 @@ def build_parser(parser_class: type[argparse.ArgumentParser] = argparse.Argument
     export = commands.add_parser("export", help="write training data: export [FILE]")
     export.add_argument("out", nargs="?", default="loopos-dataset.jsonl")
     export.add_argument("--all", action="store_true", help="every iteration, not just useful ones")
+    export.add_argument("--val", type=float, default=0.0, metavar="FRACTION",
+                        help="put this share of loops in a separate validation file (e.g. 0.1)")
     export.set_defaults(func=cmd_export)
 
     daemon = commands.add_parser("daemon", help="supervisor: daemon start|stop|status")

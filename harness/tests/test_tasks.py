@@ -65,3 +65,24 @@ def test_bench_scores_solutions_and_catches_test_edits(harness, project, tmp_pat
     summary = tasks.bench(harness.root, out, parallel=1, spec={"provider": "scripted", "script": str(cheat)}, poll=0.2)
     assert summary["solved"] == 0
     assert all(r["status"] == "done" and r["tampered_tests"] == ["test_calc.py"] for r in summary["results"])
+
+
+def test_holdout_tasks_use_different_bugs(project, tmp_path):
+    out, held = tmp_path / "p-tasks", tmp_path / "p-holdout"
+    manifest = tasks.make(project, out, count=2, check=CHECK, holdout=1, holdout_out=held)
+    held_manifest = json.loads((held / "tasks.json").read_text())
+    assert len(manifest) == 2 and len(held_manifest) == 1
+    assert held_manifest[0]["name"] == "task-001" and (held / "task-001" / "calc.py").is_file()
+    bugs = {t["bug"] for t in manifest} | {t["bug"] for t in held_manifest}
+    assert len(bugs) == 3  # no mutation appears in both sets
+
+
+def test_bench_runs_several_task_folders(harness, project, tmp_path):
+    a, b = tmp_path / "a-tasks", tmp_path / "b-tasks"
+    tasks.make(project, a, count=1, check=CHECK)
+    tasks.make(project, b, count=1, check=CHECK, seed=1)
+    fix = tmp_path / "fix.json"
+    fix.write_text(json.dumps([{"action": "write_file", "path": "calc.py", "content": GOOD, "reason": "restore"}]))
+    summary = tasks.bench(harness.root, [a, b], parallel=2, spec={"provider": "scripted", "script": str(fix)}, poll=0.2)
+    assert sorted(r["task"] for r in summary["results"]) == ["a-tasks/task-001", "b-tasks/task-001"]
+    assert summary["solved"] == 2

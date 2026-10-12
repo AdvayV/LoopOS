@@ -178,3 +178,12 @@ def test_pause_and_kill_reach_running_commands(harness, workspace):
     harness.request("kill", loop=loop_id)
     time.sleep(0.5)
     assert not os.path.exists(f"/proc/{command_pid}") or process_state(command_pid) == "Z"
+
+
+def test_dataset_export_can_hold_loops_aside_for_validation(harness, workspace, tmp_path):
+    harness.wait(harness.run(workspace, [READ, FIX]))
+    out = tmp_path / "data.jsonl"
+    counts = dataset.export(harness.root, out, val_fraction=1.0)
+    assert counts == {"read": 2, "written": 0, "validation": 2, "duplicates": 0}
+    assert out.read_text() == "" and len((tmp_path / "data.val.jsonl").read_text().splitlines()) == 2
+    assert dataset.is_validation("l1", 0.0) is False and dataset.is_validation("l1", 1.0) is True

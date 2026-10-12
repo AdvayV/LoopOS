@@ -15,7 +15,7 @@ Reply with a single JSON object and nothing else:
 Rules:
 - Paths are relative to the workspace. You cannot leave it or modify .git/.
 - `edit_file` replaces text that must occur exactly once; read the file first and copy it exactly.
-- Commands run without a shell (no pipes, redirects or &&) and only allowed programs work.
+- Commands run without a shell (no pipes, redirects or &&), only allowed programs work, and there is no network.
 - The supervisor runs the done check after every change. The goal is met only when it passes.
 - If the supervisor says you are repeating yourself, change approach instead of retrying."""
 
