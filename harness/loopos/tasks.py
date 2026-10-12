@@ -165,7 +165,13 @@ def bench(root: Path, tasks_dirs: Path | list[Path], *, parallel: int = 2, spec:
         for task in json.loads((directory / "tasks.json").read_text()):
             label = task["name"] if len(dirs) == 1 else f"{directory.name}/{task['name']}"
             manifest.append({**task, "label": label, "source": directory / task["name"]})
-    run_dir = root / "bench" / time.strftime("%Y%m%d-%H%M%S")
+    base = root / "bench" / time.strftime("%Y%m%d-%H%M%S")
+    run_dir = base
+    for n in range(2, 1000):  # two benchmarks within a second must not share a folder
+        if not run_dir.exists():
+            break
+        run_dir = base.with_name(f"{base.name}-{n}")
+    run_dir.mkdir(parents=True)
     start_daemon(root)
     pending, running, results = list(manifest), {}, []
     while pending or running:
@@ -199,6 +205,5 @@ def bench(root: Path, tasks_dirs: Path | list[Path], *, parallel: int = 2, spec:
         "mean_iterations_when_solved": round(sum(r["iterations"] for r in solved) / len(solved), 1) if solved else None,
         "results": results, "spec": spec or {}, "run_dir": str(run_dir),
     }
-    run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "results.json").write_text(json.dumps(summary, indent=2))
     return summary

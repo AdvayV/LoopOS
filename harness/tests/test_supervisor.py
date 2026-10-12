@@ -165,6 +165,7 @@ LONG = {"action": "run", "command": "python -c 'import time; time.sleep(30)'", "
 def test_pause_and_kill_reach_running_commands(harness, workspace):
     loop_id = harness.run(workspace, [LONG])
     loop = harness.supervisor.loops[loop_id]
+    harness.wait_for_event(loop_id, "baseline")  # the baseline check is a tracked job too; let it finish
     deadline = time.monotonic() + 10
     while not len(loop.jobs) and time.monotonic() < deadline:
         time.sleep(0.05)
