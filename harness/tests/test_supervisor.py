@@ -169,15 +169,25 @@ def test_pause_and_kill_reach_running_commands(harness, workspace):
     while not len(loop.jobs) and time.monotonic() < deadline:
         time.sleep(0.05)
     command_pid = next(iter(loop.jobs._processes)).pid
+
+    def story() -> str:
+        return "; ".join(f"{e['kind']}: {e['message']}" for e in harness.events(loop_id))
+
+    def state() -> str:
+        try:
+            return process_state(command_pid)
+        except FileNotFoundError:
+            return "gone"
+
     harness.request("pause", loop=loop_id)
     time.sleep(0.3)
-    assert process_state(command_pid) == "T"
+    assert state() == "T", story()
     harness.request("resume", loop=loop_id)
     time.sleep(0.3)
-    assert process_state(command_pid) in {"S", "R"}
+    assert state() in {"S", "R"}, f"command {state()} after resume; {story()}"
     harness.request("kill", loop=loop_id)
     time.sleep(0.5)
-    assert not os.path.exists(f"/proc/{command_pid}") or process_state(command_pid) == "Z"
+    assert state() in {"gone", "Z"}, story()
 
 
 def test_dataset_export_can_hold_loops_aside_for_validation(harness, workspace, tmp_path):
