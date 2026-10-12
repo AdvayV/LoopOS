@@ -181,6 +181,55 @@ def test_paused_jobs_do_not_time_out(policy):
     assert code == 0 and time.monotonic() - started >= 1.5 and len(jobs) == 0
 
 
-def test_check_ollama_explains_problems():
-    from loopos.model import check_ollama
-    assert "cannot reach Ollama" in check_ollama("http://127.0.0.1:9", "m", timeout=1)
+def test_check_model_explains_problems():
+    from loopos.model import check_model
+    assert "Is the model server running?" in check_model("ollama", "http://127.0.0.1:9", "m", timeout=1)
+    assert "llama-server" in check_model("openai", "http://127.0.0.1:9/v1", "m", timeout=1)
+
+
+def test_http_providers_send_the_schema_and_parse_replies():
+    import json
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    from loopos.model import OllamaProvider, OpenAIProvider, check_model
+
+    seen = []
+    action = '{"action": "finish", "reason": "ok"}'
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def reply(self, payload):
+            body = json.dumps(payload).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            self.reply({"data": [{"id": "tiny"}]} if self.path == "/v1/models" else {"models": [{"name": "tiny:latest"}]})
+
+        def do_POST(self):
+            seen.append((self.path, json.loads(self.rfile.read(int(self.headers["Content-Length"])))))
+            if self.path == "/api/chat":
+                self.reply({"message": {"content": action}})
+            else:
+                self.reply({"choices": [{"message": {"content": action}}]})
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    try:
+        messages = [{"role": "user", "content": "hi"}]
+        assert OllamaProvider("tiny", base).complete(messages) == action
+        assert OpenAIProvider("tiny", base + "/v1").complete(messages) == action
+        assert seen[0][0] == "/api/chat" and seen[0][1]["format"]["required"] == ["action", "reason"]
+        assert seen[1][0] == "/v1/chat/completions"
+        assert seen[1][1]["response_format"]["json_schema"]["schema"]["required"] == ["action", "reason"]
+        assert check_model("ollama", base, "tiny") == "" and check_model("openai", base + "/v1", "tiny") == ""
+        assert "not served" in check_model("openai", base + "/v1", "other")
+    finally:
+        server.shutdown()

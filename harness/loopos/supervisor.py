@@ -35,7 +35,7 @@ from .store import Store
 TERMINAL = {"done", "stopped", "gave_up", "budget", "failed"}
 DEFAULTS: dict[str, Any] = {
     "priority": 5, "max_iters": 30, "max_minutes": 60, "provider": "ollama", "model": "qwen2.5-coder:7b",
-    "ollama_url": "http://localhost:11434", "allow": list(syscalls.DEFAULT_ALLOW), "command_timeout": 120,
+    "model_url": None, "allow": list(syscalls.DEFAULT_ALLOW), "command_timeout": 120,
     "check_timeout": 300, "memory_mb": 2048, "model_timeout": 600,
 }
 PACKAGE_ROOT = str(Path(__file__).resolve().parent.parent)
@@ -216,6 +216,8 @@ class Supervisor:
         if workspace == Path.home() or workspace == Path("/"):
             raise LoopOSError("refusing to use your home or root directory as a workspace")
         spec["workspace"] = str(workspace)
+        if spec["provider"] not in {"ollama", "openai", "scripted"}:
+            raise LoopOSError(f"unknown provider {spec['provider']!r}")
         if not 0 <= int(spec["priority"]) <= 10:
             raise LoopOSError("priority must be between 0 and 10")
         if spec["provider"] == "scripted":

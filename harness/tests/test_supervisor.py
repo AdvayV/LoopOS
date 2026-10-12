@@ -116,7 +116,7 @@ def test_hung_model_call_is_killed_and_restarted(harness, workspace):
     threading.Thread(target=lambda: [held.append(server.accept()) for _ in range(5)], daemon=True).start()
     url = f"http://127.0.0.1:{server.getsockname()[1]}"
     loop_id = harness.request("run", spec={"goal": "g", "until": "false", "workspace": str(workspace),
-                                           "provider": "ollama", "model": "m", "ollama_url": url})["id"]
+                                           "provider": "ollama", "model": "m", "model_url": url})["id"]
     loop = harness.wait(loop_id, timeout=20)
     assert loop.status == "failed" and "hung" in loop.note
     server.close()
@@ -127,7 +127,7 @@ def test_unreachable_model_pauses_the_loop(harness, workspace):
     port_holder.bind(("127.0.0.1", 0))
     url = f"http://127.0.0.1:{port_holder.getsockname()[1]}"  # bound but not listening: connection refused
     loop_id = harness.request("run", spec={"goal": "g", "until": "false", "workspace": str(workspace),
-                                           "provider": "ollama", "model": "m", "ollama_url": url})["id"]
+                                           "provider": "ollama", "model": "m", "model_url": url})["id"]
     loop = harness.wait(loop_id, {"paused"}, timeout=20)
     assert "model unavailable" in loop.note
     harness.request("kill", loop=loop_id)

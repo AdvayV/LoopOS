@@ -19,7 +19,7 @@ python -m venv .venv && .venv/bin/pip install -e '.[test]'
 .venv/bin/loopos --help        # or: python -m loopos --help
 ```
 
-The worker model is served by [Ollama](https://ollama.com): locally (`ollama pull qwen2.5-coder:7b`), or on the GPU VM through `loopos-vm tunnel` (see `../infra/aws`). Either way it is reached at `http://localhost:11434`.
+The worker model is served by [Ollama](https://ollama.com) (`--provider ollama`, default `http://localhost:11434`): locally (`ollama pull qwen2.5-coder:7b`), or on the GPU VM through `loopos-vm tunnel` (see `../infra/aws`). Any OpenAI-compatible server also works with `--provider openai --model-url http://host:port/v1`: llama.cpp's `llama-server`, vLLM or LM Studio. A key, if needed, is read from `$LOOPOS_API_KEY`.
 
 ## How it works
 

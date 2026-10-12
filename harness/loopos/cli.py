@@ -11,7 +11,7 @@ from typing import Any
 
 from . import dataset, paths, tasks
 from .client import daemon_running, request, start_daemon
-from .model import check_ollama
+from .model import check_model
 from .protocol import LoopOSError
 from .supervisor import DEFAULTS, TERMINAL
 
@@ -76,12 +76,12 @@ def cmd_run(args: argparse.Namespace) -> int:
     spec = {
         "goal": args.goal, "until": args.until, "workspace": str(Path(args.workspace).resolve()),
         "priority": args.priority, "max_iters": args.max_iters, "max_minutes": args.max_minutes,
-        "provider": args.provider, "model": args.model, "ollama_url": args.ollama_url,
+        "provider": args.provider, "model": args.model, "model_url": args.model_url,
         "script": str(Path(args.script).resolve()) if args.script else None,
         "allow": sorted(set(DEFAULTS["allow"]) | set(args.allow or [])),
     }
-    if args.provider == "ollama" and not args.no_model_check:
-        problem = check_ollama(args.ollama_url, args.model)
+    if args.provider != "scripted" and not args.no_model_check:
+        problem = check_model(args.provider, args.model_url, args.model)
         if problem:
             raise LoopOSError(problem)
     start_daemon(args.root)
@@ -186,11 +186,11 @@ def cmd_tasks(args: argparse.Namespace) -> int:
 
 
 def cmd_bench(args: argparse.Namespace) -> int:
-    spec = {"provider": args.provider, "model": args.model, "ollama_url": args.ollama_url,
+    spec = {"provider": args.provider, "model": args.model, "model_url": args.model_url,
             "max_iters": args.max_iters, "priority": args.priority,
             "script": str(Path(args.script).resolve()) if args.script else None}
-    if args.provider == "ollama":
-        problem = check_ollama(args.ollama_url, args.model)
+    if args.provider != "scripted":
+        problem = check_model(args.provider, args.model_url, args.model)
         if problem:
             raise LoopOSError(problem)
     summary = tasks.bench(args.root, Path(args.tasks), parallel=args.parallel, spec=spec)
@@ -223,9 +223,11 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--priority", type=int, default=DEFAULTS["priority"], help="0-10, higher gets the model first")
     run.add_argument("--max-iters", type=int, default=DEFAULTS["max_iters"])
     run.add_argument("--max-minutes", type=float, default=DEFAULTS["max_minutes"])
-    run.add_argument("--provider", choices=["ollama", "scripted"], default=DEFAULTS["provider"])
+    run.add_argument("--provider", choices=["ollama", "openai", "scripted"], default=DEFAULTS["provider"],
+                     help="ollama, an OpenAI-compatible server (llama-server, vLLM), or scripted replies")
     run.add_argument("--model", default=os.environ.get("LOOPOS_MODEL", DEFAULTS["model"]))
-    run.add_argument("--ollama-url", default=os.environ.get("OLLAMA_HOST_URL", DEFAULTS["ollama_url"]))
+    run.add_argument("--model-url", default=os.environ.get("LOOPOS_MODEL_URL"),
+                     help="model server URL (default: localhost:11434 for ollama, localhost:8080/v1 for openai)")
     run.add_argument("--script", help="JSON list of replies for --provider scripted")
     run.add_argument("--allow", action="append", metavar="PROGRAM", help="extra program the loop may run")
     run.add_argument("--no-model-check", action="store_true", help="start even if the model is unreachable now")
@@ -271,9 +273,9 @@ def build_parser() -> argparse.ArgumentParser:
     bench.add_argument("--parallel", type=int, default=2, help="loops running at once (they share the model)")
     bench.add_argument("--max-iters", type=int, default=20)
     bench.add_argument("--priority", type=int, default=DEFAULTS["priority"])
-    bench.add_argument("--provider", choices=["ollama", "scripted"], default=DEFAULTS["provider"])
+    bench.add_argument("--provider", choices=["ollama", "openai", "scripted"], default=DEFAULTS["provider"])
     bench.add_argument("--model", default=os.environ.get("LOOPOS_MODEL", DEFAULTS["model"]))
-    bench.add_argument("--ollama-url", default=os.environ.get("OLLAMA_HOST_URL", DEFAULTS["ollama_url"]))
+    bench.add_argument("--model-url", default=os.environ.get("LOOPOS_MODEL_URL"))
     bench.add_argument("--script", help="JSON replies for --provider scripted")
     bench.set_defaults(func=cmd_bench)
 
