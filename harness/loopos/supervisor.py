@@ -320,7 +320,9 @@ class Supervisor:
                 item.score = item.best_score = monitor.score(check["exit_code"], check["output"])
                 item.best_check = check
                 self._event(item, "baseline", f"Baseline done check exited {check['exit_code']} "
-                                              f"(score {item.score:.2f}). Saved checkpoint 0.")
+                                              f"(score {item.score:.2f}). Saved checkpoint 0.",
+                            {"check_exit": check["exit_code"], "score": item.score,
+                             "tests": monitor.test_counts(check["output"])})
                 self._persist(item)
         return {"check": item.check, "score": item.score, "listing": self._listing(item), "hint": item.hint}
 
@@ -397,6 +399,15 @@ class Supervisor:
                 "outcome": monitor.fingerprint(result.get("output", "")),
                 "check": monitor.fingerprint(check["output"]),
             }])[-20:]
+            outcome = ("invalid" if name == "invalid" else "refused" if result.get("refused")
+                       else "ok" if result.get("ok") else "failed")
+            self._event(item, "iteration", f"#{iteration} {syscalls.fingerprint_text(action)} -> {outcome}, "
+                                           f"check exit {check['exit_code']}, score {current:.2f}", {
+                "n": iteration, "action": name, "target": action.get("path") or action.get("command") or "",
+                "outcome": outcome, "exit_code": result.get("exit_code"), "detail": result.get("output", "")[:200],
+                "check_exit": check["exit_code"], "score": current, "improved": improved,
+                "tests": monitor.test_counts(check["output"]),
+            })
             if improved:
                 item.best_score, item.best_iteration, item.best_check, item.since_best = current, iteration, check, 0
                 self._event(item, "checkpoint", f"New best score {current:.2f} at iteration {iteration}; checkpoint saved.")
@@ -419,7 +430,8 @@ class Supervisor:
             if verdict.kind != "ok":
                 if item.recoveries >= self.rules.max_recoveries:
                     self._terminate(item, "gave_up", f"Gave up: {verdict.reason} "
-                                                     f"(after {item.recoveries} recoveries).")
+                                                     f"(after {item.recoveries} recoveries).",
+                                    data={"summary": verdict.summary, "recoveries": item.recoveries})
                     return self._verdict(item, "stop", event="gave_up")
                 item.recoveries += 1
                 self._restore_best(item)
@@ -430,7 +442,9 @@ class Supervisor:
                              "Try a different approach.")
                 self._event(item, verdict.kind, f"{verdict.kind.capitalize()} detected: {verdict.reason}. "
                                                 f"Restored checkpoint from iteration {item.best_iteration} "
-                                                f"(recovery {item.recoveries}/{self.rules.max_recoveries}).")
+                                                f"(recovery {item.recoveries}/{self.rules.max_recoveries}).",
+                            {"summary": verdict.summary, "restored_iteration": item.best_iteration,
+                             "recovery": item.recoveries, "max_recoveries": self.rules.max_recoveries})
                 self._persist(item)
                 return self._verdict(item, "continue", event=verdict.kind)
             if name == "finish":
@@ -472,7 +486,8 @@ class Supervisor:
         item.check = item.best_check
         item.score = item.best_score
 
-    def _terminate(self, item: Loop, status: str, reason: str, *, restore: bool = True) -> None:
+    def _terminate(self, item: Loop, status: str, reason: str, *, restore: bool = True,
+                   data: dict[str, Any] | None = None) -> None:
         """Move a loop to a final state. Unsuccessful endings leave the workspace at the best checkpoint."""
         if restore and item.best_score > item.score and self._checkpoint_dir(item).is_dir():
             self._restore_best(item)
@@ -481,7 +496,7 @@ class Supervisor:
         item.note = reason
         item.waiting_model = item.holding_model = item.pause_requested = False
         self.scheduler.forget(item.id)
-        self._event(item, status, reason)
+        self._event(item, status, reason, {**(data or {}), "iterations": item.iteration})
         self._persist(item)
         self._dispatch()
 

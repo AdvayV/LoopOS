@@ -1,48 +1,72 @@
-"""`loopos`: start loops, watch them, and control them."""
+"""`loopos`: start loops, watch them, and control them.
+
+Run `loopos` with no arguments on a terminal for the interactive prompt; every subcommand also works
+directly (`loopos run ...`, `loopos ps`, ...).
+"""
 from __future__ import annotations
 
 import argparse
 import os
+import shlex
 import sys
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from . import dataset, paths, tasks
+from . import dataset, paths, tasks, ui
 from .client import daemon_running, request, start_daemon
 from .model import check_model
 from .protocol import LoopOSError
 from .supervisor import DEFAULTS, TERMINAL
 
-
-# ------------------------------------------------------------------ formatting
-
-def clock(ts: float) -> str:
-    return datetime.fromtimestamp(ts).strftime("%H:%M:%S")
+style = ui.Style()
 
 
-def format_event(event: dict[str, Any]) -> str:
-    return f"{clock(event['ts'])}  {event['loop_id'] or '-':<4} {event['kind']:<10} {event['message']}"
+def say(text: str = "") -> None:
+    print(text, flush=True)
 
 
-def state_label(loop: dict[str, Any]) -> str:
-    if loop["status"] == "running" and loop["holding_model"]:
-        return "thinking"
-    if loop["status"] == "running" and loop["waiting_model"]:
-        return "waiting"
-    return loop["status"]
+# ------------------------------------------------------------------ live loop view
 
-
-def table(loops: list[dict[str, Any]]) -> str:
-    if not loops:
-        return "No loops. Start one with: loopos run --goal \"...\" --until \"...\""
-    rows = [("ID", "STATE", "PRI", "ITER", "SCORE", "BEST", "GOAL", "NOTE")]
-    for loop in loops:
-        rows.append((loop["id"], state_label(loop), str(loop["priority"]), f"{loop['iteration']}/{loop['max_iters']}",
-                     f"{loop['score']:.2f}", f"{loop['best_score']:.2f}", loop["goal"][:38], loop["note"][:60]))
-    widths = [max(len(row[i]) for row in rows) for i in range(len(rows[0]) - 1)]
-    return "\n".join("  ".join(cell.ljust(w) for cell, w in zip(row, widths)) + "  " + row[-1] for row in rows)
+def watch(root: Path, loop_id: str, *, live: bool = True) -> int:
+    """Print a loop's story one line per iteration, with a spinner for what it is doing now."""
+    info = request(root, "show", loop=loop_id)
+    say(ui.loop_header(style, info["loop"], info["spec"]))
+    line = ui.LiveLine(style)
+    after, started, frame, last_poll, memo = 0, None, 0, 0.0, {}
+    try:
+        while True:
+            now = time.monotonic()
+            if now - last_poll >= 0.4:
+                last_poll = now
+                events = request(root, "logs", loop=loop_id, after=after, limit=1000)["events"]
+                final = None
+                for event in events:
+                    after = event["seq"]
+                    if event["kind"] == "created":
+                        started = event["ts"]
+                    for text in ui.event_lines(style, event, started, memo):
+                        line.print(text)
+                    if event["kind"] in ui.FINAL:
+                        final = event["kind"]
+                if final:
+                    line.clear()
+                    return 0 if final == "done" else 1
+                loop = request(root, "show", loop=loop_id)["loop"]
+                if loop["status"] in TERMINAL and not events:
+                    line.clear()
+                    say()
+                    return 0 if loop["status"] == "done" else 1
+                if not live:
+                    return 0
+            line.draw(ui.status_line(style, loop, frame))
+            frame += 1
+            time.sleep(0.1)
+    except KeyboardInterrupt:
+        line.clear()
+        say(style.dim(f"\n  detached — {loop_id} keeps running. Watch again with: watch {loop_id}"))
+        return 0
 
 
 # ------------------------------------------------------------------ commands
@@ -51,23 +75,24 @@ def cmd_daemon(args: argparse.Namespace) -> int:
     root = args.root
     if args.action == "start":
         start_daemon(root)
-        print(f"Supervisor running (pid {request(root, 'ping')['pid']}).")
+        say(f"  {style.green('●')} supervisor running " + style.dim(f"(pid {request(root, 'ping')['pid']})"))
     elif args.action == "stop":
         if not daemon_running(root):
-            print("Supervisor is not running.")
+            say(style.dim("  supervisor is not running"))
             return 0
         request(root, "shutdown")
         for _ in range(100):
             if not daemon_running(root):
                 break
             time.sleep(0.1)
-        print("Supervisor stopped. Unfinished loops resume when it starts again.")
+        say(f"  {style.dim('●')} supervisor stopped " + style.dim("(unfinished loops resume when it starts again)"))
     else:
         if daemon_running(root):
             info = request(root, "ping")
-            print(f"Supervisor running (pid {info['pid']}, {info['loops']} loops). State: {root}")
+            say(f"  {style.green('●')} supervisor running " + style.dim(f"(pid {info['pid']}, {info['loops']} loops, "
+                                                                         f"state in {ui.short_path(str(root))})"))
         else:
-            print(f"Supervisor not running. State: {root}")
+            say(f"  {style.dim('●')} supervisor not running " + style.dim(f"(state in {ui.short_path(str(root))})"))
             return 1
     return 0
 
@@ -87,31 +112,20 @@ def cmd_run(args: argparse.Namespace) -> int:
             raise LoopOSError(problem)
     start_daemon(args.root)
     loop_id = request(args.root, "run", spec=spec)["id"]
-    print(f"Started loop {loop_id}. Watch: loopos logs {loop_id} -f   Status: loopos ps")
-    if args.follow:
-        return follow(args.root, loop_id)
-    return 0
-
-
-def follow(root: Path, loop_id: str | None, after: int = 0) -> int:
-    try:
-        while True:
-            events = request(root, "logs", loop=loop_id, after=after)["events"]
-            for event in events:
-                print(format_event(event), flush=True)
-                after = event["seq"]
-            if loop_id and request(root, "show", loop=loop_id)["loop"]["status"] in TERMINAL and not events:
-                status = request(root, "show", loop=loop_id)["loop"]
-                print(f"\nLoop {loop_id} finished: {status['status']}. {status['note']}")
-                return 0 if status["status"] == "done" else 1
-            time.sleep(1)
-    except KeyboardInterrupt:
-        print("\nDetached; the loop keeps running.")
+    if args.detach or not style.tty:
+        say(f"  {style.accent('▸')} started {style.accent(loop_id)}" + style.dim(f"  ·  watch {loop_id}  ·  ps"))
         return 0
+    say()
+    return watch(args.root, loop_id)
+
+
+def cmd_watch(args: argparse.Namespace) -> int:
+    say()
+    return watch(args.root, args.id)
 
 
 def cmd_ps(args: argparse.Namespace) -> int:
-    print(table(request(args.root, "ps", all=args.all)["loops"]))
+    say(ui.ps_table(style, request(args.root, "ps", all=args.all)["loops"]))
     return 0
 
 
@@ -119,13 +133,21 @@ def cmd_top(args: argparse.Namespace) -> int:
     try:
         while True:
             state = request(args.root, "ps", all=True)
-            events = request(args.root, "logs", limit=12)["events"]
-            output = [f"LoopOS  {datetime.now():%H:%M:%S}  (Ctrl+C to exit)", "", table(state["loops"])]
+            loops = state["loops"]
+            output = [ui.banner(style, f"live view · {datetime.now():%H:%M:%S} · Ctrl+C to exit"), "",
+                      ui.ps_table(style, loops)]
             decision = state.get("decision")
-            if decision:
-                rows = ", ".join(f"{c['loop']}: {c['base']}+{c['aging_bonus']}={c['score']}" for c in decision["candidates"])
-                output += ["", f"Last model turn -> {decision['selected']}   ({rows})"]
-            output += ["", "Recent events:"] + [format_event(e) for e in events]
+            if decision and len(decision["candidates"]) > 1:
+                rows = "  ".join(f"{c['loop']} {c['base']}+{c['aging_bonus']}" for c in decision["candidates"])
+                output += ["", style.dim("  last model turn → ") + style.accent(decision["selected"])
+                           + style.dim(f"   (priority + aging: {rows})")]
+            recent = [e for e in request(args.root, "logs", limit=60)["events"] if e["kind"] != "syscall"][-8:]
+            if recent:
+                output += ["", style.dim("  recent")]
+                for event in recent:
+                    lines = [t for t in ui.event_lines(style, event) if t.strip()]
+                    for text in lines or ["       " + style.dim(ui.clip(event["message"], ui.width() - 20))]:
+                        output.append(style.dim(f"  {event['loop_id'] or '-':<4}") + text)
             sys.stdout.write("\033[H\033[2J" + "\n".join(output) + "\n")
             sys.stdout.flush()
             time.sleep(args.interval)
@@ -136,53 +158,61 @@ def cmd_top(args: argparse.Namespace) -> int:
 def cmd_show(args: argparse.Namespace) -> int:
     info = request(args.root, "show", loop=args.id)
     loop, spec = info["loop"], info["spec"]
-    print(f"Loop {loop['id']}: {loop['status']}  (pid {loop['pid'] or '-'})")
-    print(f"  goal       {spec['goal']}")
-    print(f"  done when  `{spec['until']}` exits 0")
-    print(f"  workspace  {spec['workspace']}")
-    print(f"  model      {spec['provider']}:{spec.get('model')}  priority {spec['priority']}")
-    print(f"  progress   iteration {loop['iteration']}/{spec['max_iters']}, score {loop['score']:.2f}, "
-          f"best {loop['best_score']:.2f}, {loop['active_seconds']}s active")
-    print(f"  watchdog   {loop['restarts']} restarts, {loop['recoveries']} recoveries")
+    say(ui.loop_header(style, loop, spec).rstrip())
+    rows = [
+        ("state", ui.state_badge(style, ui.state_of(loop)) + style.dim(f"   pid {loop['pid'] or '-'}")),
+        ("progress", f"iteration {loop['iteration']}/{spec['max_iters']}   " + ui.score_bar(style, loop["score"])
+         + f" {loop['score']:.2f}" + style.dim(f"   best {loop['best_score']:.2f} · {loop['active_seconds']}s active")),
+        ("watchdog", f"{loop['restarts']} restarts · {loop['recoveries']} recoveries"),
+    ]
     if loop["note"]:
-        print(f"  note       {loop['note']}")
+        rows.append(("note", loop["note"]))
     if info["hint"]:
-        print(f"  hint       {info['hint']}")
+        rows.append(("hint", info["hint"]))
+    for label, value in rows:
+        say(f"    {style.dim(label.ljust(9))}{value}")
     check = info.get("check") or {}
     if check:
-        print(f"\nLatest done check (exit {check['exit_code']}):\n{check['output'][-1500:]}")
+        tail = [l for l in check["output"].strip().splitlines() if l.strip()][-6:]
+        say(f"\n    {style.dim('last check')} exit {check['exit_code']}")
+        for text in tail:
+            say("    " + style.dim("│ ") + ui.clip(text, ui.width() - 8))
     return 0
 
 
 def cmd_logs(args: argparse.Namespace) -> int:
-    if args.follow:
-        return follow(args.root, args.id)
+    if args.id and not args.raw:
+        say()
+        return watch(args.root, args.id, live=args.follow)
     for event in request(args.root, "logs", loop=args.id, limit=args.lines)["events"]:
-        print(format_event(event))
+        stamp = datetime.fromtimestamp(event["ts"]).strftime("%H:%M:%S")
+        say(style.dim(stamp) + f"  {style.accent((event['loop_id'] or '-').ljust(4))} "
+            + style.dim(event["kind"].ljust(10)) + " " + event["message"])
     return 0
 
 
 def cmd_control(args: argparse.Namespace) -> int:
     reply = request(args.root, args.command, loop=args.id)
     if reply.get("pending"):
-        print(f"{args.id}: pause requested; it stops when its current model turn ends.")
+        say(f"  {style.yellow('⏸')} {args.id} pauses when its current model turn ends")
     else:
-        print(f"{args.id}: {args.command} ok")
+        icon = {"pause": style.yellow("⏸"), "resume": style.accent("▶"), "kill": style.red("■")}[args.command]
+        say(f"  {icon} {args.id} " + {"pause": "paused", "resume": "resumed", "kill": "stopped"}[args.command])
     return 0
 
 
 def cmd_export(args: argparse.Namespace) -> int:
     counts = dataset.export(args.root, Path(args.out), args.mode)
-    print(f"Read {counts['read']} iterations; wrote {counts['written']} examples to {args.out} "
-          f"({counts['duplicates']} duplicates skipped).")
+    say(f"  {style.green('✓')} {counts['written']} training examples → {ui.short_path(str(Path(args.out).resolve()))}"
+        + style.dim(f"   (from {counts['read']} iterations, {counts['duplicates']} duplicates skipped)"))
     return 0
 
 
 def cmd_tasks(args: argparse.Namespace) -> int:
     manifest = tasks.make(Path(args.source), Path(args.out), args.count, args.until, args.seed)
     for task in manifest:
-        print(f"{task['name']}  {task['bug']}")
-    print(f"\nWrote {len(manifest)} tasks to {args.out} (manifest: {Path(args.out) / 'tasks.json'}).")
+        say(f"  {style.accent('•')} {task['name']}  " + style.dim(task["bug"]))
+    say(f"\n  {style.green('✓')} {len(manifest)} tasks → {ui.short_path(str(Path(args.out).resolve()))}")
     return 0
 
 
@@ -195,30 +225,56 @@ def cmd_bench(args: argparse.Namespace) -> int:
         problem = check_model(args.provider, args.model_url, args.model)
         if problem:
             raise LoopOSError(problem)
-    summary = tasks.bench(args.root, Path(args.tasks), parallel=args.parallel, spec=spec)
-    rows = [("TASK", "LOOP", "RESULT", "ITER", "SECS", "BUG")]
-    for r in summary["results"]:
-        result = "solved" if r["solved"] else ("edited tests" if r["tampered_tests"] else r["status"])
-        rows.append((r["task"], r["loop"], result, str(r["iterations"]), str(r["seconds"]), r["bug"]))
-    widths = [max(len(row[i]) for row in rows) for i in range(len(rows[0]) - 1)]
-    print("\n".join("  ".join(c.ljust(w) for c, w in zip(row, widths)) + "  " + row[-1] for row in rows))
+    line, frame = ui.LiveLine(style), [0]
+
+    def progress(kind: str, info: dict[str, Any]) -> None:
+        if kind == "finish":
+            if info["solved"]:
+                n = info["iterations"]
+                mark, result = style.green("✓"), f"solved · {n} iter{'s' if n != 1 else ''}"
+            elif info["tampered_tests"]:
+                mark, result = style.red("✗"), "edited the tests"
+            else:
+                mark, result = style.red("✗"), info["status"].replace("_", " ")
+            line.print(f"  {mark} {info['task']}  {result:<16}" + style.dim(f"{info['seconds']:>4}s   {info['bug']}"))
+        elif kind == "tick" and info["running"]:
+            frame[0] += 1
+            line.draw("    " + style.accent(ui.SPINNER[frame[0] % len(ui.SPINNER)]) + " "
+                      + style.dim("running " + ", ".join(info["running"])))
+
+    say(style.dim(f"  benchmarking {ui.short_path(str(Path(args.tasks).resolve()))}  ·  {args.parallel} at a time\n"))
+    summary = tasks.bench(args.root, Path(args.tasks), parallel=args.parallel, spec=spec, poll=0.25, progress=progress)
+    line.clear()
     mean = summary["mean_iterations_when_solved"]
-    print(f"\nSolved {summary['solved']}/{summary['tasks']} ({summary['success_rate']:.0%})"
-          + (f", {mean} iterations on average" if mean is not None else "")
-          + f". Details: {summary['run_dir']}/results.json")
+    say(f"\n  {style.accent('◆', bold=True)} solved {summary['solved']}/{summary['tasks']} "
+        f"({summary['success_rate']:.0%})" + (f" · {mean} iterations on average" if mean is not None else "")
+        + style.dim(f"   results.json in {ui.short_path(summary['run_dir'])}"))
     return 0
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="loopos", description="Run agent loops as supervised processes until a done check passes.")
+# ------------------------------------------------------------------ parser and shell
+
+class ShellError(Exception):
+    pass
+
+
+class ShellParser(argparse.ArgumentParser):
+    """In the interactive prompt, report mistakes in one line instead of a usage dump."""
+
+    def error(self, message: str) -> None:
+        raise ShellError(f"{message}  ·  {self.prog.removeprefix('loopos').strip() or 'command'} --help for options")
+
+
+def build_parser(parser_class: type[argparse.ArgumentParser] = argparse.ArgumentParser) -> argparse.ArgumentParser:
+    parser = parser_class(prog="loopos", description="Run agent loops as supervised processes until a done check passes.")
     parser.add_argument("--home", help="state directory (default: $LOOPOS_HOME or ~/.local/state/loopos)")
-    commands = parser.add_subparsers(dest="command", required=True)
+    commands = parser.add_subparsers(dest="command")
 
     daemon = commands.add_parser("daemon", help="start, stop or check the supervisor")
     daemon.add_argument("action", choices=["start", "stop", "status"])
     daemon.set_defaults(func=cmd_daemon)
 
-    run = commands.add_parser("run", help="start a loop")
+    run = commands.add_parser("run", help="start a loop and watch it")
     run.add_argument("--goal", required=True, help="what the loop should achieve")
     run.add_argument("--until", required=True, help="done check command; the loop ends when it exits 0")
     run.add_argument("--workspace", default=".", help="folder the loop may read and change (default: .)")
@@ -234,24 +290,29 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--script-delay", type=float, help="seconds each scripted reply takes (simulated thinking)")
     run.add_argument("--allow", action="append", metavar="PROGRAM", help="extra program the loop may run")
     run.add_argument("--no-model-check", action="store_true", help="start even if the model is unreachable now")
-    run.add_argument("-f", "--follow", action="store_true", help="stream events until the loop finishes")
+    run.add_argument("-d", "--detach", action="store_true", help="start the loop and return immediately")
     run.set_defaults(func=cmd_run)
+
+    watch_cmd = commands.add_parser("watch", help="follow a loop live, one line per iteration")
+    watch_cmd.add_argument("id")
+    watch_cmd.set_defaults(func=cmd_watch)
 
     ps = commands.add_parser("ps", help="list loops")
     ps.add_argument("-a", "--all", action="store_true", help="include finished loops")
     ps.set_defaults(func=cmd_ps)
 
-    top = commands.add_parser("top", help="live view of loops and scheduler decisions")
-    top.add_argument("--interval", type=float, default=2)
+    top = commands.add_parser("top", help="live view of all loops and scheduler decisions")
+    top.add_argument("--interval", type=float, default=1)
     top.set_defaults(func=cmd_top)
 
     show = commands.add_parser("show", help="details of one loop")
     show.add_argument("id")
     show.set_defaults(func=cmd_show)
 
-    logs = commands.add_parser("logs", help="event log (all loops, or one)")
+    logs = commands.add_parser("logs", help="a loop's story (or the raw event log)")
     logs.add_argument("id", nargs="?")
     logs.add_argument("-f", "--follow", action="store_true")
+    logs.add_argument("--raw", action="store_true", help="every supervisor event, unformatted")
     logs.add_argument("-n", "--lines", type=int, default=50)
     logs.set_defaults(func=cmd_logs)
 
@@ -290,15 +351,114 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+SHELL_HELP = [
+    ("run --goal \"…\" --until \"pytest -q\"", "start a loop and watch its iterations"),
+    ("watch ID", "follow a running loop"),
+    ("ps  ·  ps -a", "running loops  ·  all loops"),
+    ("show ID  ·  logs ID", "details  ·  the full story"),
+    ("pause ID  ·  resume ID  ·  kill ID", "control a loop"),
+    ("top", "live view of everything"),
+    ("help  ·  clear  ·  exit", ""),
+]
+
+
+def shell_help() -> None:
+    for command, text in SHELL_HELP:
+        say(f"  {style.accent(command.ljust(36))}{style.dim(text)}")
+
+
+def shell(root: Path) -> int:
+    """Interactive prompt under the logo; each line is a loopos subcommand."""
+    parser = build_parser(ShellParser)
+    commands = set(next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction)).choices)
+    say(ui.banner(style))
+    say()
+    shell_help()
+    try:
+        start_daemon(root)  # so ps, logs and run work straight away
+    except LoopOSError as exc:
+        say(style.red(f"  ✖ {exc}"))
+    say()
+    try:
+        import readline
+        history = root / "history"
+        try:
+            readline.read_history_file(history)
+        except OSError:
+            pass
+    except ImportError:
+        readline = None
+    # \001 and \002 tell readline the colour codes take no space on screen.
+    prompt = ("\001" + "\033[38;5;149m\002" if style.color else "") + "loopos" \
+        + ("\001\033[0m\002" if style.color else "") + " ❯ "
+    while True:
+        try:
+            line = input(prompt).strip()
+        except (EOFError, KeyboardInterrupt):
+            say()
+            break
+        if not line:
+            continue
+        if line in {"exit", "quit", "q"}:
+            break
+        if line in {"help", "?"}:
+            shell_help()
+            continue
+        if line == "clear":
+            sys.stdout.write("\033[H\033[2J")
+            say(ui.banner(style))
+            continue
+        try:
+            tokens = shlex.split(line)
+        except ValueError as exc:
+            say(style.red(f"  ✖ {exc}"))
+            continue
+        if tokens[0] == "loopos":
+            tokens = tokens[1:]
+        if not tokens or tokens[0] not in commands:
+            say(style.red(f"  ✖ unknown command {tokens[0] if tokens else ''!r}") + style.dim("  ·  type help"))
+            continue
+        try:
+            args = parser.parse_args(tokens)
+        except ShellError as exc:
+            say(style.red(f"  ✖ {exc}"))
+            continue
+        except SystemExit:  # --help was printed
+            continue
+        if not getattr(args, "func", None):
+            shell_help()
+            continue
+        args.root = root
+        try:
+            args.func(args)
+        except LoopOSError as exc:
+            say(style.red(f"  ✖ {exc}"))
+        except KeyboardInterrupt:
+            say()
+        say()
+    if readline:
+        try:
+            readline.write_history_file(root / "history")
+        except OSError:
+            pass
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
     args.root = Path(args.home).expanduser().resolve() if args.home else paths.home()
     args.root.mkdir(parents=True, exist_ok=True)
+    if not getattr(args, "func", None):
+        if sys.stdin.isatty() and sys.stdout.isatty():
+            return shell(args.root)
+        parser.print_help()
+        return 1
     try:
         return args.func(args)
     except LoopOSError as exc:
-        hint = " Start it with: loopos daemon start" if "not running" in str(exc) else ""
-        print(f"loopos: {exc}.{hint}", file=sys.stderr)
+        hint = "  Start it with: loopos daemon start" if "not running" in str(exc) else ""
+        print(style.red(f"  ✖ {exc}") + style.dim(hint), file=sys.stderr)
         return 1
 
 

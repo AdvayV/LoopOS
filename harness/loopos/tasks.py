@@ -20,7 +20,7 @@ import time
 import tokenize
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from . import checkpoint
 from .client import request, start_daemon
@@ -142,8 +142,13 @@ def make(source: Path, out: Path, count: int, check: str = DEFAULT_CHECK, seed: 
 
 
 def bench(root: Path, tasks_dir: Path, *, parallel: int = 2, spec: dict[str, Any] | None = None,
-          poll: float = 1.0) -> dict[str, Any]:
-    """Run a loop on every task (at most `parallel` at once) and summarize the results."""
+          poll: float = 1.0, progress: Callable[[str, dict[str, Any]], None] | None = None) -> dict[str, Any]:
+    """Run a loop on every task (at most `parallel` at once) and summarize the results.
+
+    `progress(kind, info)` is called with "start" ({task, loop}), "finish" (a result row) and, every
+    poll, "tick" ({running: [task names]}), so callers can show results as they arrive.
+    """
+    report = progress or (lambda kind, info: None)
     manifest = json.loads((tasks_dir / "tasks.json").read_text())
     run_dir = root / "bench" / time.strftime("%Y%m%d-%H%M%S")
     start_daemon(root)
@@ -156,7 +161,9 @@ def bench(root: Path, tasks_dir: Path, *, parallel: int = 2, spec: dict[str, Any
             loop_spec = {**(spec or {}), "goal": task["goal"], "until": task["until"], "workspace": str(workspace)}
             loop_id = request(root, "run", spec=loop_spec)["id"]
             running[loop_id] = (task, workspace, time.monotonic())
+            report("start", {"task": task["name"], "loop": loop_id})
         time.sleep(poll)
+        report("tick", {"running": [task["name"] for task, _, _ in running.values()]})
         states = {loop["id"]: loop for loop in request(root, "ps", all=True)["loops"]}
         for loop_id in [i for i in running if states[i]["status"] in {"done", "stopped", "gave_up", "budget", "failed"}]:
             task, workspace, started = running.pop(loop_id)
@@ -168,6 +175,7 @@ def bench(root: Path, tasks_dir: Path, *, parallel: int = 2, spec: dict[str, Any
             results.append({"task": task["name"], "loop": loop_id, "status": loop["status"], "solved": solved,
                             "tampered_tests": tampered, "iterations": loop["iteration"],
                             "seconds": round(time.monotonic() - started), "bug": task["bug"]})
+            report("finish", results[-1])
     results.sort(key=lambda r: r["task"])
     solved = [r for r in results if r["solved"]]
     summary = {

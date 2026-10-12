@@ -2,12 +2,28 @@
 
 Start a loop with a goal and a done check, then walk away. A worker process asks a model for one action at a time; the supervisor checks and performs each action, runs the done check itself, and keeps the loop on track until the check passes or a budget runs out.
 
+Type `loopos` on its own for the interactive prompt under the LoopOS logo, or use any command directly:
+
 ```bash
 loopos run --goal "make the tests pass" --until "pytest -q" --workspace ./myproject
-loopos ps            # loops and their progress
-loopos top           # live view, including scheduler decisions
-loopos logs l1 -f    # every action, check, recovery and restart
 ```
+
+`run` then shows the loop live, one line per iteration as it completes, with a spinner for what it is doing now:
+
+```
+  ◆ l1  Fix the bug so the tests pass
+    until pytest -q  ·  qwen2.5-coder:3b  ·  priority 5
+    in    ~/myproject
+
+  start  ✗ failing · 10/11 tests
+    1  ✗ run    pytest -q                           exit 1                ━━━━━━━─ 0.91
+    2  ✓ read   inventory.py                                              ━━━━━━━─ 0.91
+    3  ✓ edit   inventory.py                                              ━━━━━━━━ 1.00  11/11 tests  ★ best
+
+  ✔ done · check passed · 3 iterations · 6s
+```
+
+Ctrl+C detaches (the loop keeps running); `loopos watch l1` picks it up again. `loopos ps` lists loops, `loopos top` is a live view of all of them. Colours follow the terminal and are off when `NO_COLOR` is set.
 
 ## Install
 
@@ -50,9 +66,11 @@ Scores come from the done check: exit 0 is 1.0, a pytest summary gives the pass 
 
 | Command | |
 |---|---|
-| `loopos run --goal G --until CMD [--workspace DIR] [--priority 0-10] [--max-iters N] [--max-minutes M] [--model NAME] [--allow PROGRAM] [-f]` | Start a loop (starts the supervisor if needed). |
+| `loopos` | Interactive prompt: type any command below without the `loopos` prefix; `help`, `clear`, `exit`. |
+| `loopos run --goal G --until CMD [--workspace DIR] [--priority 0-10] [--max-iters N] [--max-minutes M] [--model NAME] [--allow PROGRAM] [-d]` | Start a loop and watch it (starts the supervisor if needed); `-d` returns immediately. |
+| `loopos watch ID` | Follow a loop live, one line per iteration. |
 | `loopos ps [-a]`, `loopos top`, `loopos show ID` | Inspect loops. |
-| `loopos logs [ID] [-f] [-n N]` | Event log. |
+| `loopos logs [ID] [-f] [--raw] [-n N]` | A loop's story; without an ID or with `--raw`, the raw supervisor event log. |
 | `loopos pause ID`, `resume ID`, `kill ID` | Control a loop. |
 | `loopos daemon start\|stop\|status` | Manage the supervisor. |
 | `loopos tasks make --from DIR --out DIR [--count N]` | Plant one bug per task in a passing project (only bugs the tests catch). |
@@ -61,7 +79,7 @@ Scores come from the done check: exit 0 is 1.0, a pytest summary gives the pass 
 
 State lives in `$LOOPOS_HOME` (default `~/.local/state/loopos`): `loopos.db` (loops and events), and `loops/<id>/` with `spec.json`, `state.json`, `trace.jsonl`, `worker.log` and `checkpoints/`.
 
-Without a model, `--provider scripted --script replies.json` replays a JSON list of actions; this is what the tests use.
+Without a model, `--provider scripted --script replies.json` replays a JSON list of actions (`--script-delay` adds thinking time); this is what the tests use. `examples/demo.sh` tours every feature this way.
 
 ## Practice tasks and benchmarks
 
