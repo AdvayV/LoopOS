@@ -7,6 +7,7 @@ IDLE_CHECKS=6      # 6 checks x 5 min = 30 min idle -> shut down
 MAX_HOURS=8        # hard cap; 24 while `loopos-vm busy on` (e.g. a training run)
 
 export DEBIAN_FRONTEND=noninteractive
+export HOME=/root   # cloud-init runs without it and `ollama pull` panics on an unset $HOME
 apt-get update
 apt-get install -y python3-venv python3-pip python3-dev build-essential git htop
 
