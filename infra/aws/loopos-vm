@@ -23,7 +23,11 @@ instance() {
     Name=instance-state-name,Values=pending,running,stopping,stopped \
     --query 'Reservations[].Instances[0].[InstanceId,PublicIpAddress]' --output text | head -1
 }
-ip() { read -r _ addr <<<"$(instance)"; [ -n "${addr:-}" ] && [ "$addr" != None ] || { echo "No running VM. Run: loopos-vm up" >&2; exit 1; }; echo "$addr"; }
+ip() {
+  read -r _ addr <<<"$(instance)"; [ -n "${addr:-}" ] && [ "$addr" != None ] || { echo "No running VM. Run: loopos-vm up" >&2; exit 1; }
+  allow_my_ip   # the owner's IP can change while the VM is up; re-open SSH for the current one
+  echo "$addr"
+}
 remote() { ssh "${SSH_OPTS[@]}" ubuntu@"$(ip)" "$@"; }
 
 allow_my_ip() {
