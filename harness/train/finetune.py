@@ -112,6 +112,10 @@ def main(argv: list[str] | None = None) -> int:
         tokenizer.pad_token = tokenizer.eos_token
     model = AutoModelForCausalLM.from_pretrained(args.base, dtype=dtype)
     model.config.use_cache = False
+    # Recompute activations in the backward pass: a 0.5B model on 4k-token examples otherwise needs
+    # ~6 GB for activations alone, more than a small CPU VM has.
+    model.gradient_checkpointing_enable()
+    model.enable_input_require_grads()
     targets = [m for m in TARGET_MODULES if any(name.endswith(m) for name, _ in model.named_modules())]
     if not targets:
         targets = "all-linear"
@@ -138,6 +142,7 @@ def main(argv: list[str] | None = None) -> int:
         warmup_steps=max(1, total_steps // 20), logging_steps=5, save_strategy="no", report_to=[],
         seed=args.seed, use_cpu=device == "cpu", bf16=device == "cuda", dataloader_num_workers=0,
         remove_unused_columns=False, eval_strategy="epoch" if val_set else "no",
+        gradient_checkpointing=True, gradient_checkpointing_kwargs={"use_reentrant": False},
     )
     trainer = Trainer(model=model, args=training_arguments(arguments), train_dataset=train_set,
                       eval_dataset=val_set, data_collator=DataCollatorForSeq2Seq(tokenizer, padding=True))
