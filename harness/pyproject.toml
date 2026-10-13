@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "loopos"
+version = "0.1.0"
+description = "A loop harness that runs AI agent loops as supervised OS processes until a done check passes."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+test = ["pytest>=8.3"]
+
+[project.scripts]
+loopos = "loopos.cli:main"
+
+[tool.setuptools]
+packages = ["loopos"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

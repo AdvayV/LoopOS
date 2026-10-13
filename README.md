@@ -1,6 +1,10 @@
 # LoopOS
 
-## New: Crisis Lab
+## New: Loop harness (CLI)
+
+`harness/` runs real agent loops as supervised Linux processes: start a loop with a goal and a done check, and the supervisor schedules the model, performs each requested action as a checked syscall, sandboxes commands with rlimits and Landlock, restarts crashed or hung workers, and recovers from livelock until the check passes. See [the harness guide](harness/README.md). `infra/aws/` holds the throwaway CPU VM that serves the model.
+
+## Crisis Lab
 
 The website now opens **Crisis Lab**, a fictional campus-festival control room with real resource checks and optional Codex planning through ChatGPT sign-in (no API key). Read [the Crisis Lab guide](CRISIS_LAB.md) for the walkthrough, integration setup, and OS concepts. The original simulation backend remains available.
 

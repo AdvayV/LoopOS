@@ -8,3 +8,5 @@ loopos.db
 node_modules/
 dist/
 .env
+*.egg-info/
+harness/train/out/

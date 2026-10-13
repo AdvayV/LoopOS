@@ -1,0 +1,114 @@
+#!/bin/bash
+# Manage the throwaway LoopOS CPU VM. Created on `up`, deleted on `down`: no cost while idle.
+#   loopos-vm up [--type T] [--on-demand]   launch (spot by default), wait until the model is ready
+#   loopos-vm tunnel                        forward the VM's Ollama to localhost:11434 (Ctrl+C to close)
+#   loopos-vm ssh [CMD...]                  open a shell on the VM, or run CMD there
+#   loopos-vm pull MODEL                    download another Ollama model on the VM
+#   loopos-vm push LOCAL [REMOTE]           copy files to the VM (default: ~/)
+#   loopos-vm fetch REMOTE [LOCAL]          copy files back (do this before `down`!)
+#   loopos-vm busy on|off                   keep the VM alive without SSH (long training runs, 24h cap)
+#   loopos-vm status                        show LoopOS VMs
+#   loopos-vm down                          terminate the VM (deletes its disk too)
+#   loopos-vm template                      create/update the launch template from user-data.sh
+set -euo pipefail
+export AWS_REGION=${AWS_REGION:-us-east-1}
+NAME=loopos-vm
+TYPE=${LOOPOS_VM_TYPE:-c7i.2xlarge}
+SG=sg-0e5ceb2dcc10a5d0d
+KEY=~/.ssh/loopos-vm.pem
+SSH_OPTS=(-i "$KEY" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=~/.ssh/loopos_known_hosts -o ServerAliveInterval=30)
+
+instance() {
+  aws ec2 describe-instances --filters Name=tag:Name,Values=$NAME \
+    Name=instance-state-name,Values=pending,running,stopping,stopped \
+    --query 'Reservations[].Instances[0].[InstanceId,PublicIpAddress]' --output text | head -1
+}
+ip() {
+  read -r _ addr <<<"$(instance)"; [ -n "${addr:-}" ] && [ "$addr" != None ] || { echo "No running VM. Run: loopos-vm up" >&2; exit 1; }
+  allow_my_ip   # the owner's IP can change while the VM is up; re-open SSH for the current one
+  echo "$addr"
+}
+remote() { ssh "${SSH_OPTS[@]}" ubuntu@"$(ip)" "$@"; }
+
+allow_my_ip() {
+  # Home IPs change; keep SSH open only to the current one.
+  local me; me=$(curl -fsS https://checkip.amazonaws.com)/32
+  local old; old=$(aws ec2 describe-security-groups --group-ids $SG --query 'SecurityGroups[0].IpPermissions[?FromPort==`22`].IpRanges[].CidrIp' --output text)
+  for cidr in $old; do [ "$cidr" = "$me" ] || aws ec2 revoke-security-group-ingress --group-id $SG --protocol tcp --port 22 --cidr "$cidr" >/dev/null; done
+  [[ " $old " == *" $me "* ]] || aws ec2 authorize-security-group-ingress --group-id $SG --protocol tcp --port 22 --cidr "$me" >/dev/null
+}
+
+template_data() {
+  local user_data; user_data=$(base64 -w0 "$(dirname "$(readlink -f "$0")")/user-data.sh")
+  cat <<JSON
+{
+  "ImageId": "resolve:ssm:/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id",
+  "InstanceType": "c7i.2xlarge",
+  "KeyName": "loopos-vm",
+  "SecurityGroupIds": ["$SG"],
+  "InstanceInitiatedShutdownBehavior": "terminate",
+  "MetadataOptions": {"HttpTokens": "required", "HttpEndpoint": "enabled"},
+  "BlockDeviceMappings": [{"DeviceName": "/dev/sda1", "Ebs": {"VolumeSize": 40, "VolumeType": "gp3", "Encrypted": true, "DeleteOnTermination": true}}],
+  "TagSpecifications": [
+    {"ResourceType": "instance", "Tags": [{"Key": "Name", "Value": "$NAME"}, {"Key": "project", "Value": "loopos"}]},
+    {"ResourceType": "volume", "Tags": [{"Key": "Name", "Value": "$NAME"}, {"Key": "project", "Value": "loopos"}]}
+  ],
+  "UserData": "$user_data"
+}
+JSON
+}
+
+case "${1:-}" in
+  template)
+    data=$(mktemp); template_data > "$data"
+    if aws ec2 describe-launch-templates --launch-template-names $NAME >/dev/null 2>&1; then
+      v=$(aws ec2 create-launch-template-version --launch-template-name $NAME --launch-template-data "file://$data" --query LaunchTemplateVersion.VersionNumber --output text)
+      aws ec2 modify-launch-template --launch-template-name $NAME --default-version "$v" >/dev/null
+      echo "Launch template $NAME now at version $v"
+    else
+      aws ec2 create-launch-template --launch-template-name $NAME --launch-template-data "file://$data" >/dev/null && echo "Created launch template $NAME"
+    fi
+    rm -f "$data" ;;
+  up)
+    shift
+    market=(--instance-market-options 'MarketType=spot,SpotOptions={SpotInstanceType=one-time,InstanceInterruptionBehavior=terminate}')
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --type) TYPE=$2; shift 2 ;;
+        --on-demand) market=(); shift ;;
+        *) echo "unknown option $1" >&2; exit 1 ;;
+      esac
+    done
+    [ -z "$(instance)" ] || { echo "Already running: $(instance)"; exit 0; }
+    allow_my_ip
+    id=$(aws ec2 run-instances --launch-template LaunchTemplateName=$NAME --instance-type "$TYPE" "${market[@]}" \
+         --query 'Instances[0].InstanceId' --output text)
+    echo "Launched $id ($TYPE); waiting for it to boot..."
+    aws ec2 wait instance-running --instance-ids "$id"
+    addr=$(ip)
+    until ssh "${SSH_OPTS[@]}" -o ConnectTimeout=5 ubuntu@"$addr" true 2>/dev/null; do sleep 5; done
+    echo "Booted at $addr; installing Ollama and downloading the model (a few minutes)..."
+    for i in $(seq 120); do ssh "${SSH_OPTS[@]}" ubuntu@"$addr" test -f /var/lib/loopos-ready 2>/dev/null && break; sleep 10; done
+    ssh "${SSH_OPTS[@]}" ubuntu@"$addr" test -f /var/lib/loopos-ready || { echo "Setup did not finish; check: loopos-vm ssh, then sudo tail /var/log/cloud-init-output.log" >&2; exit 1; }
+    ssh "${SSH_OPTS[@]}" ubuntu@"$addr" 'echo "$(nproc) vCPUs, $(free -g | awk "/Mem/{print \$2}") GB RAM"; ollama list'
+    echo "Ready. Next: loopos-vm tunnel   (and loopos-vm down when finished)" ;;
+  tunnel) addr=$(ip); echo "Ollama on http://localhost:11434 (Ctrl+C to close)"; ssh "${SSH_OPTS[@]}" -N -L 11434:localhost:11434 ubuntu@"$addr" ;;
+  ssh) shift; addr=$(ip); exec ssh "${SSH_OPTS[@]}" ubuntu@"$addr" "$@" ;;
+  pull) [ -n "${2:-}" ] || { echo "usage: loopos-vm pull MODEL" >&2; exit 1; }; remote ollama pull "$2" ;;
+  push) [ -n "${2:-}" ] || { echo "usage: loopos-vm push LOCAL [REMOTE]" >&2; exit 1; }
+        scp "${SSH_OPTS[@]}" -r "$2" ubuntu@"$(ip)":"${3:-}" ;;
+  fetch) [ -n "${2:-}" ] || { echo "usage: loopos-vm fetch REMOTE [LOCAL]" >&2; exit 1; }
+         scp "${SSH_OPTS[@]}" -r ubuntu@"$(ip)":"$2" "${3:-.}" ;;
+  busy)
+    case "${2:-}" in
+      on) remote sudo touch /var/lib/loopos-busy && echo "VM stays up without SSH (24h cap). Turn off with: loopos-vm busy off" ;;
+      off) remote sudo rm -f /var/lib/loopos-busy && echo "Idle shutdown re-enabled (30 min without SSH, 8h cap)." ;;
+      *) echo "usage: loopos-vm busy on|off" >&2; exit 1 ;;
+    esac ;;
+  status) aws ec2 describe-instances --filters Name=tag:Name,Values=$NAME \
+            --query 'Reservations[].Instances[].[InstanceId,InstanceType,State.Name,InstanceLifecycle||`on-demand`,PublicIpAddress,LaunchTime]' --output table ;;
+  down)
+    read -r id _ <<<"$(instance)"; [ -n "${id:-}" ] || { echo "Nothing running."; exit 0; }
+    aws ec2 terminate-instances --instance-ids "$id" >/dev/null && echo "Terminating $id (billing stops)." ;;
+  *) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+esac
