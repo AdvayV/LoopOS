@@ -25,6 +25,8 @@ def keep(record: dict[str, Any], loop_status: str, mode: str) -> bool:
         return True
     if record["refused"] or record["action"].get("action") == "invalid":
         return False
+    if record["action"].get("action") == "finish" and record["score_after"] < 1.0:
+        return False  # a later repair must not make premature completion a teaching target
     if record["score_after"] > record["score_before"] or record["event"] == "done":
         return True
     return loop_status == "done" and record["event"] not in {"livelock", "stalled"}

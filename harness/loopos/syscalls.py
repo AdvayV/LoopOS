@@ -6,6 +6,7 @@ performs it or refuses with a reason the model can read.
 """
 from __future__ import annotations
 
+import codecs
 import os
 import shlex
 import signal
@@ -87,7 +88,7 @@ def validate(request: Any) -> dict[str, Any]:
     if not isinstance(request, dict):
         raise SyscallError("an action must be a JSON object")
     name = request.get("action")
-    if name not in ACTIONS:
+    if not isinstance(name, str) or name not in ACTIONS:
         raise SyscallError(f"unknown action {name!r}; use one of: {', '.join(sorted(ACTIONS))}")
     action: dict[str, Any] = {"action": name, "reason": str(request.get("reason", ""))[:500]}
     for key in sorted(ACTIONS[name]):
@@ -96,6 +97,8 @@ def validate(request: Any) -> dict[str, Any]:
             raise SyscallError(f"{name} needs a string field {key!r}")
         if key in {"path", "command", "find"} and not value.strip():
             raise SyscallError(f"{name}: {key!r} must not be empty")
+        if key in {"path", "command"} and "\0" in value:
+            raise SyscallError(f"{name}: {key!r} must not contain NUL characters")
         action[key] = value
     return action
 
@@ -118,12 +121,16 @@ def truncate(text: str, limit: int) -> str:
 
 
 def resolve_path(policy: Policy, relative: str, *, for_write: bool = False) -> Path:
-    candidate = (policy.workspace / relative).resolve()
+    try:
+        candidate = (policy.workspace / relative).resolve()
+    except (OSError, RuntimeError) as exc:
+        raise SyscallError(f"cannot resolve path {relative!r}: {exc}") from exc
     if candidate != policy.workspace and policy.workspace not in candidate.parents:
         raise SyscallError(f"path {relative!r} is outside the workspace")
     parts = candidate.relative_to(policy.workspace).parts
-    if for_write and parts and parts[0] in PROTECTED_DIRS:
-        raise SyscallError(f"{parts[0]}/ is protected and cannot be modified")
+    protected = next((part for part in parts if part in PROTECTED_DIRS), None)
+    if for_write and protected:
+        raise SyscallError(f"{protected}/ is protected and cannot be modified")
     return candidate
 
 
@@ -191,9 +198,20 @@ def run_command(argv: list[str], policy: Policy, *, timeout: int | None = None,
         jobs.add(process)
     # Read output on a thread and wait for the command itself: a background child holding the pipe
     # open must not keep the syscall waiting.
-    chunks: list[bytes] = []
-    reader = threading.Thread(target=lambda: chunks.extend(iter(lambda: process.stdout.read1(65536), b"")),
-                              daemon=True)
+    tail, total_chars = "", 0
+
+    def read_output() -> None:
+        nonlocal tail, total_chars
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        while True:
+            chunk = process.stdout.read1(65536)
+            decoded = decoder.decode(chunk, final=not chunk)
+            total_chars += len(decoded)
+            tail = (tail + decoded)[-policy.output_limit:]
+            if not chunk:
+                break
+
+    reader = threading.Thread(target=read_output, daemon=True)
     reader.start()
     timed_out = False
     try:
@@ -214,15 +232,19 @@ def run_command(argv: list[str], policy: Policy, *, timeout: int | None = None,
                     break
     finally:
         _signal_group(process, signal.SIGKILL)
+        process.wait()
         if jobs is not None:
             jobs.discard(process)
-    reader.join(timeout=5)
-    if not reader.is_alive():
-        process.stdout.close()
-    text = b"".join(chunks).decode(errors="replace")
+        reader.join(timeout=5)
+        if not reader.is_alive():
+            process.stdout.close()
     if timed_out:
-        return 124, truncate(text + f"\n[killed after {limit:g}s timeout]", policy.output_limit)
-    return process.returncode, truncate(text, policy.output_limit)
+        message = f"\n[killed after {limit:g}s timeout]"
+        total_chars += len(message)
+        tail = (tail + message)[-policy.output_limit:]
+    text = (f"[... {total_chars - len(tail)} earlier characters omitted ...]\n"
+            if total_chars > len(tail) else "") + tail
+    return (124 if timed_out else process.returncode), text
 
 
 def _list_dir(policy: Policy, path: Path) -> str:
@@ -258,9 +280,10 @@ def execute(request: Any, policy: Policy, jobs: Jobs | None = None) -> dict[str,
         if name == "read_file":
             if not path.is_file():
                 raise SyscallError(f"no such file: {action['path']}")
-            text = path.read_text(errors="replace")
+            with path.open(errors="replace") as source:
+                text = source.read(policy.read_limit + 1)
             if len(text) > policy.read_limit:
-                text = text[: policy.read_limit] + f"\n[... truncated, {len(text) - policy.read_limit} more characters]"
+                text = text[: policy.read_limit] + "\n[... truncated, more characters omitted]"
             return {"ok": True, "output": text}
         if name == "write_file":
             if len(action["content"]) > policy.write_limit:
@@ -271,13 +294,21 @@ def execute(request: Any, policy: Policy, jobs: Jobs | None = None) -> dict[str,
         # edit_file: replace exactly one occurrence so edits are unambiguous.
         if not path.is_file():
             raise SyscallError(f"no such file: {action['path']}")
-        text = path.read_text()
+        with path.open() as source:
+            text = source.read(policy.write_limit + 1)
+        if len(text) > policy.write_limit:
+            raise SyscallError(f"file exceeds {policy.write_limit} characters")
         count = text.count(action["find"])
         if count != 1:
             raise SyscallError(f"`find` text occurs {count} times in {action['path']}; it must occur exactly once")
-        path.write_text(text.replace(action["find"], action["replace"], 1))
+        updated = text.replace(action["find"], action["replace"], 1)
+        if len(updated) > policy.write_limit:
+            raise SyscallError(f"edited content exceeds {policy.write_limit} characters")
+        path.write_text(updated)
         return {"ok": True, "output": f"edited {action['path']}"}
     except SyscallError as exc:
         return {"ok": False, "refused": True, "output": f"Refused: {exc}"}
     except OSError as exc:
         return {"ok": False, "output": f"Error: {exc.strerror or exc}"}
+    except (UnicodeError, ValueError) as exc:
+        return {"ok": False, "refused": True, "output": f"Refused: {exc}"}

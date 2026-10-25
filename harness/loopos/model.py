@@ -107,7 +107,7 @@ def check_model(provider: str, url: str | None, model: str, timeout: float = 5) 
     if wanted not in names:
         get = f"ollama pull {model}" if provider == "ollama" else "load it on the server"
         have = ", ".join(sorted(names)[:4]) or "none"
-        return f"{model} isn't on the server  ·  {get}, or pick one with: loopos model NAME (have: {have})"
+        return f"{model} isn't on the server  ·  {get}, or pick one with: python -m loopos.admin model NAME (have: {have})"
     return ""
 
 
