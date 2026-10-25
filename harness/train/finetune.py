@@ -18,11 +18,10 @@ import random
 import sys
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-import torch
-from peft import LoraConfig, get_peft_model
-from transformers import (AutoModelForCausalLM, AutoTokenizer, DataCollatorForSeq2Seq, Trainer,
-                          TrainingArguments)
+if TYPE_CHECKING:
+    from transformers import TrainingArguments
 
 TARGET_MODULES = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
 
@@ -68,6 +67,8 @@ def encode(tokenizer, messages: list[dict[str, str]], max_length: int) -> dict[s
 def training_arguments(wanted: dict) -> TrainingArguments:
     """Build TrainingArguments across transformers versions: options this version lacks are dropped
     (or renamed where an older spelling exists)."""
+    from transformers import TrainingArguments
+
     known = {f.name for f in dataclasses.fields(TrainingArguments)}
     renames = {"eval_strategy": "evaluation_strategy", "use_cpu": "no_cuda"}
     accepted = {}
@@ -79,7 +80,8 @@ def training_arguments(wanted: dict) -> TrainingArguments:
     return TrainingArguments(**accepted)
 
 
-class ChatDataset(torch.utils.data.Dataset):
+class ChatDataset:
+    """Map-style dataset consumed through __len__ and __getitem__ by PyTorch."""
     def __init__(self, tokenizer, examples, max_length: int) -> None:
         self.items = [e for e in (encode(tokenizer, m, max_length) for m in examples) if e is not None]
         self.skipped = len(examples) - len(self.items)
@@ -119,6 +121,10 @@ def main(argv: list[str] | None = None) -> int:
     val_examples = read_examples(args.val, args.limit) if args.val else None
     if not train_examples or (args.val and not val_examples):
         parser.error("training and any requested validation file must contain examples")
+
+    import torch
+    from peft import LoraConfig, get_peft_model
+    from transformers import (AutoModelForCausalLM, AutoTokenizer, DataCollatorForSeq2Seq, Trainer)
 
     torch.manual_seed(args.seed)
     random.seed(args.seed)
