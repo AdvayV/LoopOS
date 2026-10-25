@@ -3,7 +3,7 @@ from __future__ import annotations
 import io
 
 from loopos import ui
-from loopos.cli import ShellError, ShellParser, build_parser
+from loopos.admin import ShellError, ShellParser, build_parser
 
 
 def plain() -> ui.Style:

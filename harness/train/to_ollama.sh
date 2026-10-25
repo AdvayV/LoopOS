@@ -26,5 +26,5 @@ PARAMETER num_ctx 8192
 EOF
 ollama create "$NAME" --quantize "$QUANT" -f "$MERGED/Modelfile"
 echo
-echo "Created Ollama model '$NAME' ($QUANT). Use it with:   loopos model $NAME"
-echo "Compare against the base model on held-out tasks:   loopos bench <project>-holdout"
+echo "Created Ollama model '$NAME' ($QUANT). Use it with:   python -m loopos.admin model $NAME"
+echo "Compare against the base model on held-out tasks:   python -m loopos.admin bench <project>-holdout"

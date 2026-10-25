@@ -1,0 +1,284 @@
+{
+  "training": {
+    "base": "Qwen/Qwen2.5-Coder-1.5B-Instruct",
+    "train_examples": 82,
+    "validation_examples": 15,
+    "epochs": 1.0,
+    "training_loss": 0.4275954665527457,
+    "baseline_validation_loss": 1.1491572856903076,
+    "validation_loss": 0.1359010487794876,
+    "runtime_seconds": 8716.2,
+    "dataset_note": "Assess data provenance and held-out task performance before claiming model improvement."
+  },
+  "guided_generation": {
+    "scope": "six guided format checks, not autonomous task accuracy",
+    "reports": [
+      {
+        "model": "Qwen/Qwen2.5-Coder-1.5B-Instruct",
+        "cases": [
+          {
+            "expected_action": "list_dir",
+            "valid_request": true,
+            "matches_guided_request": true,
+            "reply": "```json\n{\"action\": \"list_dir\", \"path\": \".\", \"reason\": \"To list the current working directory.\"}\n```",
+            "error": "",
+            "seconds": 16.43
+          },
+          {
+            "expected_action": "read_file",
+            "valid_request": true,
+            "matches_guided_request": true,
+            "reply": "```json\n{\n  \"action\": \"read_file\",\n  \"path\": \"calc.py\",\n  \"reason\": \"To ensure we don't overwrite any important code.\"\n}\n```",
+            "error": "",
+            "seconds": 16.47
+          },
+          {
+            "expected_action": "write_file",
+            "valid_request": false,
+            "matches_guided_request": false,
+            "reply": "```json\n{\n  \"action\": \"create_file\",\n  \"path\": \"notes.txt\",\n  \"content\": \"hello\",\n  \"reason\": \"to create a file with the exact content 'hello'\"\n}\n```",
+            "error": "unknown action 'create_file'; use one of: edit_file, finish, list_dir, read_file, run, write_file",
+            "seconds": 18.88
+          },
+          {
+            "expected_action": "edit_file",
+            "valid_request": true,
+            "matches_guided_request": true,
+            "reply": "```json\n{\n  \"action\": \"edit_file\",\n  \"path\": \"calc.py\",\n  \"find\": \"return a - b\",\n  \"replace\": \"return a + b\",\n  \"reason\": \"The goal is to replace the unique exact text 'return a - b' with 'return a + b'.\"\n}\n```",
+            "error": "",
+            "seconds": 26.17
+          },
+          {
+            "expected_action": "run",
+            "valid_request": true,
+            "matches_guided_request": true,
+            "reply": "```json\n{\n  \"action\": \"run\",\n  \"command\": \"pytest -q\"\n}\n```",
+            "error": "",
+            "seconds": 12.69
+          },
+          {
+            "expected_action": "finish",
+            "valid_request": true,
+            "matches_guided_request": true,
+            "reply": "```json\n{\"action\": \"finish\", \"reason\": \"the goal is met\"}\n```",
+            "error": "",
+            "seconds": 11.45
+          }
+        ],
+        "valid_requests": 5,
+        "matched_requests": 5,
+        "total": 6
+      },
+      {
+        "model": "train/out/model-final/merged",
+        "cases": [
+          {
+            "expected_action": "list_dir",
+            "valid_request": true,
+            "matches_guided_request": true,
+            "reply": "{\"action\": \"list_dir\", \"path\": \".\", \"reason\": \"Locate the project files.\"}",
+            "error": "",
+            "seconds": 87.23
+          },
+          {
+            "expected_action": "read_file",
+            "valid_request": true,
+            "matches_guided_request": true,
+            "reply": "{\"action\": \"read_file\", \"path\": \"calc.py\", \"reason\": \"Inspect the original implementation.\"}",
+            "error": "",
+            "seconds": 12.39
+          },
+          {
+            "expected_action": "write_file",
+            "valid_request": true,
+            "matches_guided_request": true,
+            "reply": "{\"action\": \"write_file\", \"path\": \"notes.txt\", \"content\": \"hello\", \"reason\": \"Write the exact text.\"}",
+            "error": "",
+            "seconds": 13.89
+          },
+          {
+            "expected_action": "edit_file",
+            "valid_request": true,
+            "matches_guided_request": false,
+            "reply": "{\"action\": \"read_file\", \"path\": \"calc.py\", \"reason\": \"Inspect the original implementation.\"}",
+            "error": "",
+            "seconds": 13.0
+          },
+          {
+            "expected_action": "run",
+            "valid_request": true,
+            "matches_guided_request": true,
+            "reply": "{\"action\": \"run\", \"command\": \"pytest -q\", \"reason\": \"Inspect the failing tests before repairing the implementation.\"}",
+            "error": "",
+            "seconds": 13.49
+          },
+          {
+            "expected_action": "finish",
+            "valid_request": true,
+            "matches_guided_request": false,
+            "reply": "{\"action\": \"list_dir\", \"path\": \".\", \"reason\": \"Locate the project files.\"}",
+            "error": "",
+            "seconds": 11.88
+          }
+        ],
+        "valid_requests": 6,
+        "matched_requests": 4,
+        "total": 6
+      }
+    ]
+  },
+  "data_provenance": "scripted oracle demonstrations, task-separated validation",
+  "coverage": {
+    "prior_harness_tests_passed": 94,
+    "ghostty_checks_passed": 31,
+    "finetune_checks_passed": 12
+  },
+  "artifact_sha256": "1bddffa11b2140eca88923770223ddbe307ba946dfb1293ff575796906df613a",
+  "merge_verification": {
+    "date": "2026-10-25",
+    "harness_tests_passed": 107,
+    "backend_tests_passed": 18,
+    "frontend_tests_passed": 12,
+    "example_tests_passed": {
+      "grid": 7,
+      "inventory": 11,
+      "ledger": 8,
+      "queue": 8,
+      "textstats": 17
+    },
+    "ghostty_checks_passed": 31,
+    "frontend_production_build": "passed",
+    "shell_script_syntax": "passed",
+    "training_runtime": {
+      "pytorch_dataloader": true,
+      "trainer_arguments": true
+    },
+    "guided_generation": {
+      "scope": "six guided format checks, not autonomous task accuracy",
+      "reports": [
+        {
+          "model": "Qwen/Qwen2.5-Coder-1.5B-Instruct",
+          "cases": [
+            {
+              "expected_action": "list_dir",
+              "valid_request": true,
+              "matches_guided_request": true,
+              "reply": "```json\n{\"action\": \"list_dir\", \"path\": \".\", \"reason\": \"To list the current working directory.\"}\n```",
+              "error": "",
+              "seconds": 17.98
+            },
+            {
+              "expected_action": "read_file",
+              "valid_request": true,
+              "matches_guided_request": true,
+              "reply": "```json\n{\n  \"action\": \"read_file\",\n  \"path\": \"calc.py\",\n  \"reason\": \"To ensure we don't overwrite any important code.\"\n}\n```",
+              "error": "",
+              "seconds": 21.77
+            },
+            {
+              "expected_action": "write_file",
+              "valid_request": false,
+              "matches_guided_request": false,
+              "reply": "```json\n{\n  \"action\": \"create_file\",\n  \"path\": \"notes.txt\",\n  \"content\": \"hello\",\n  \"reason\": \"to create a file with the exact content 'hello'\"\n}\n```",
+              "error": "unknown action 'create_file'; use one of: edit_file, finish, list_dir, read_file, run, write_file",
+              "seconds": 25.16
+            },
+            {
+              "expected_action": "edit_file",
+              "valid_request": true,
+              "matches_guided_request": true,
+              "reply": "```json\n{\n  \"action\": \"edit_file\",\n  \"path\": \"calc.py\",\n  \"find\": \"return a - b\",\n  \"replace\": \"return a + b\",\n  \"reason\": \"The goal is to replace the unique exact text 'return a - b' with 'return a + b'.\"\n}\n```",
+              "error": "",
+              "seconds": 35.7
+            },
+            {
+              "expected_action": "run",
+              "valid_request": true,
+              "matches_guided_request": true,
+              "reply": "```json\n{\n  \"action\": \"run\",\n  \"command\": \"pytest -q\"\n}\n```",
+              "error": "",
+              "seconds": 15.67
+            },
+            {
+              "expected_action": "finish",
+              "valid_request": true,
+              "matches_guided_request": true,
+              "reply": "```json\n{\"action\": \"finish\", \"reason\": \"the goal is met\"}\n```",
+              "error": "",
+              "seconds": 14.89
+            }
+          ],
+          "valid_requests": 5,
+          "matched_requests": 5,
+          "total": 6
+        },
+        {
+          "model": "train/out/model-final/merged",
+          "cases": [
+            {
+              "expected_action": "list_dir",
+              "valid_request": true,
+              "matches_guided_request": true,
+              "reply": "{\"action\": \"list_dir\", \"path\": \".\", \"reason\": \"Locate the project files.\"}",
+              "error": "",
+              "seconds": 83.29
+            },
+            {
+              "expected_action": "read_file",
+              "valid_request": true,
+              "matches_guided_request": true,
+              "reply": "{\"action\": \"read_file\", \"path\": \"calc.py\", \"reason\": \"Inspect the original implementation.\"}",
+              "error": "",
+              "seconds": 16.12
+            },
+            {
+              "expected_action": "write_file",
+              "valid_request": true,
+              "matches_guided_request": true,
+              "reply": "{\"action\": \"write_file\", \"path\": \"notes.txt\", \"content\": \"hello\", \"reason\": \"Write the exact text.\"}",
+              "error": "",
+              "seconds": 18.62
+            },
+            {
+              "expected_action": "edit_file",
+              "valid_request": true,
+              "matches_guided_request": false,
+              "reply": "{\"action\": \"read_file\", \"path\": \"calc.py\", \"reason\": \"Inspect the original implementation.\"}",
+              "error": "",
+              "seconds": 16.53
+            },
+            {
+              "expected_action": "run",
+              "valid_request": true,
+              "matches_guided_request": true,
+              "reply": "{\"action\": \"run\", \"command\": \"pytest -q\", \"reason\": \"Inspect the failing tests before repairing the implementation.\"}",
+              "error": "",
+              "seconds": 18.22
+            },
+            {
+              "expected_action": "finish",
+              "valid_request": true,
+              "matches_guided_request": false,
+              "reply": "{\"action\": \"list_dir\", \"path\": \".\", \"reason\": \"Locate the project files.\"}",
+              "error": "",
+              "seconds": 15.45
+            }
+          ],
+          "valid_requests": 6,
+          "matched_requests": 4,
+          "total": 6
+        }
+      ]
+    },
+    "vm_power": "PowerState/deallocated",
+    "ci": {
+      "commit": "4b192cdc79e5eb7fde9cb935223385302363b783",
+      "python_versions": [
+        "3.11",
+        "3.12"
+      ],
+      "conclusion": "success",
+      "url": "https://github.com/AdvayV/LoopOS/actions/runs/40207568497"
+    }
+  }
+}

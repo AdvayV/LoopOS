@@ -2,7 +2,7 @@
 
 ## New: Loop harness (CLI)
 
-`harness/` runs real agent loops as supervised Linux processes: start a loop with a goal and a done check, and the supervisor schedules the model, performs each requested action as a checked syscall, sandboxes commands with rlimits and Landlock, restarts crashed or hung workers, and recovers from livelock until the check passes. See [the harness guide](harness/README.md). `infra/aws/` holds the throwaway CPU VM that serves the model.
+`harness/` exposes three command forms: `loopos <syscall>`, `loopos check_status`, and `loopos show results`. Execute checked file/command actions, inspect their status, and explicitly retrieve saved output. Internal model training tools retain supervised agent loops with scheduling, rlimits, Landlock, and recovery. See [the harness guide](harness/README.md), [Azure training setup](infra/azure/README.md), and [AWS VM setup](infra/aws/README.md).
 
 ## Crisis Lab
 

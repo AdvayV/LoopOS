@@ -5,7 +5,7 @@ import json
 import pytest
 
 from loopos import config
-from loopos.cli import build_parser
+from loopos.admin import build_parser
 from loopos.project import detect_check
 
 
